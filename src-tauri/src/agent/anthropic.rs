@@ -1,6 +1,6 @@
 use crate::agent::{
-    AgentAttachment, AgentError, ChatResponse, LLMClient, Message, ModelTokenUsage, Role,
-    ToolSchema,
+    chat_response_content_for_tool_turn, normalize_tool_call, AgentAttachment, AgentError,
+    ChatResponse, LLMClient, Message, ModelTokenUsage, Role, ToolCallSource, ToolSchema,
 };
 use async_trait::async_trait;
 use reqwest::Client;
@@ -153,17 +153,23 @@ impl LLMClient for AnthropicClient {
         let strip_images = matches!(self.vision_supported, Some(false));
         let anthropic_messages: Vec<AnthropicMessage> = messages
             .into_iter()
-            .filter(|m| !matches!(m.role, Role::System))
             .map(|m| {
                 // P0-2: untrusted (tool/external) messages render fenced as data.
-                let content = m.model_content();
+                let role = m.role.clone();
+                let mut content = m.model_content();
+                if matches!(role, Role::System) {
+                    // Anthropic's Messages API has no per-message system role in
+                    // this adapter shape. Preserve the semantic payload as an
+                    // explicit user preamble instead of silently dropping it.
+                    content = format!("[System]\n{content}");
+                }
                 let attachments = if strip_images {
                     Vec::new()
                 } else {
                     m.attachments
                 };
                 AnthropicMessage {
-                    role: match m.role {
+                    role: match role {
                         Role::User => "user".to_string(),
                         Role::Assistant => "assistant".to_string(),
                         Role::System => "user".to_string(),
@@ -242,14 +248,19 @@ impl LLMClient for AnthropicClient {
                     content_text = Some(text);
                 }
                 AnthropicContent::ToolUse { id, name, input } => {
-                    tool_calls.push(crate::agent::ToolCall {
-                        id,
-                        name,
-                        arguments: input,
-                    });
+                    let (tool_call, _) = normalize_tool_call(
+                        crate::agent::ToolCall {
+                            id,
+                            name,
+                            arguments: input,
+                        },
+                        ToolCallSource::Standard,
+                    );
+                    tool_calls.push(tool_call);
                 }
             }
         }
+        let content_text = chat_response_content_for_tool_turn(content_text, tool_calls.is_empty());
 
         Ok(ChatResponse {
             content: content_text,

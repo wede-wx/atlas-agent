@@ -1,8 +1,10 @@
 use crate::agent::{
-    estimate_token_usage, AgentError, AgentEvent, AgentGuidanceMessage, AgentRunEvent,
-    AgentRuntime, AgentRuntimeConfig, AgentToolAuditEvent, AgentToolAuditStatus, LLMClient,
-    Message, ModelTokenUsage, Role, RunPauseRegistry, SkillRegistry, TokenBudgetEnforcer,
-    TokenBudgetSnapshot, TokenBudgetStop, ToolCall, ToolResult, ToolResultStatus,
+    advertised_tool_names, build_tool_exposure_plan, chat_response_content_for_tool_turn,
+    classify_task_intent, estimate_token_usage, normalize_tool_call, AgentError, AgentEvent,
+    AgentGuidanceMessage, AgentRunEvent, AgentRuntime, AgentRuntimeConfig, AgentToolAuditEvent,
+    AgentToolAuditStatus, LLMClient, Message, ModelTokenUsage, Role, RunPauseRegistry,
+    SkillRegistry, TokenBudgetEnforcer, TokenBudgetSnapshot, TokenBudgetStop, ToolCall,
+    ToolCallSource, ToolResult, ToolResultStatus,
 };
 use crate::tools::{SubAgentRole, ToolAccessPolicy, ToolExecutionContext, ToolRegistry};
 use std::collections::{BTreeSet, HashMap};
@@ -333,6 +335,7 @@ impl Agent {
 
         let user_input_for_capabilities = user_input.clone();
         let goal_for_audit = user_input.clone();
+        let current_turn_attachments = attachments.clone();
         let active_skills = self.skill_registry.select_for_task(&user_input, &history);
         if !active_skills.is_empty() {
             emit_event(
@@ -371,14 +374,10 @@ impl Agent {
             (!supplemental_prompts.is_empty()).then(|| supplemental_prompts.join("\n\n")),
             attachments,
         );
-        let advertise_tools_for_turn = should_advertise_tools_for_turn(
+        let task_intent = classify_task_intent(
             &user_input_for_capabilities,
             !active_skills.is_empty(),
-            messages
-                .iter()
-                .rev()
-                .find(|message| matches!(message.role, Role::User))
-                .is_some_and(|message| !message.attachments.is_empty()),
+            &current_turn_attachments,
         );
 
         let mut tool_error_budget_exhausted = false;
@@ -454,18 +453,29 @@ impl Agent {
                 );
             }
 
-            let tools = (self.tools_enabled
-                && advertise_tools_for_turn
-                && !tool_error_budget_exhausted
-                && !standalone_guidance_mode
-                && self.tool_access_policy.advertises_tools())
-            .then(|| {
+            let exposure_plan = build_tool_exposure_plan(
+                task_intent,
+                self.tools_enabled,
+                self.tool_access_policy.advertises_tools(),
+                tool_error_budget_exhausted,
+                standalone_guidance_mode,
+            );
+            let tools = exposure_plan.advertise_tools.then(|| {
                 self.tool_registry.list_schemas_for_policy_and_allowlist(
                     &self.tool_access_policy,
                     skill_tool_allowlist.as_ref(),
                     self.subagent_role,
                 )
             });
+            emit_event(
+                &event_tx,
+                AgentEvent::ToolVisibilityDecision {
+                    tools_enabled: self.tools_enabled,
+                    intent: format!("{:?}", exposure_plan.intent),
+                    advertised_tools: advertised_tool_names(tools.as_deref()),
+                    hidden_reason: exposure_plan.hidden_reason.clone(),
+                },
+            );
             // P2-4: inject a working-memory summary (read/edited/ran/failed) as a
             // per-call view so the model avoids repeating ineffective reads.
             let llm_messages = with_working_memory_note(&messages, &working_memory);
@@ -533,12 +543,63 @@ impl Agent {
                 return Ok(emit_token_budget_blocked(&event_tx, &run_id, stop));
             }
 
-            if let Some(content) = &response.content {
+            let had_content_with_tool_calls = response
+                .content
+                .as_ref()
+                .is_some_and(|content| !content.trim().is_empty())
+                && !response.tool_calls.is_empty();
+            let mut normalized_tool_calls = Vec::new();
+            for raw_tool_call in response.tool_calls {
+                let original_name = raw_tool_call.name.clone();
+                let (tool_call, changes) =
+                    normalize_tool_call(raw_tool_call, ToolCallSource::Runtime);
+                if !changes.is_empty() {
+                    emit_event(
+                        &event_tx,
+                        AgentEvent::ToolNormalizationApplied {
+                            original_name,
+                            normalized_name: tool_call.name.clone(),
+                            argument_changes: changes
+                                .iter()
+                                .map(|change| {
+                                    format!("{}:{}->{}", change.field, change.from, change.to)
+                                })
+                                .collect(),
+                        },
+                    );
+                }
+                if !self.tool_registry.has_tool(&tool_call.name) {
+                    emit_event(
+                        &event_tx,
+                        AgentEvent::UnknownToolRequested {
+                            requested: tool_call.name.clone(),
+                            nearest: self.tool_registry.nearest_tool_name(&tool_call.name),
+                        },
+                    );
+                }
+                normalized_tool_calls.push(tool_call);
+            }
+            if had_content_with_tool_calls {
+                emit_event(
+                    &event_tx,
+                    AgentEvent::ModelToolParseDiagnostic {
+                        returned_kind: "content_and_tool_calls".to_string(),
+                        parsed: true,
+                        reason: Some("content_dropped_for_tool_turn".to_string()),
+                    },
+                );
+            }
+            let response_content = chat_response_content_for_tool_turn(
+                response.content,
+                normalized_tool_calls.is_empty(),
+            );
+
+            if let Some(content) = &response_content {
                 messages.push(Message::plain(Role::Assistant, content.clone()));
             }
 
-            if !response.tool_calls.is_empty() {
-                for tool_call in response.tool_calls {
+            if !normalized_tool_calls.is_empty() {
+                for tool_call in normalized_tool_calls {
                     if let Err(error) = runtime.record_tool_call() {
                         self.emit_tool_audit(
                             &run_id,
@@ -694,7 +755,7 @@ impl Agent {
                 continue;
             }
 
-            if let Some(content) = response.content {
+            if let Some(content) = response_content {
                 let guidance = self.drain_guidance(&run_id).await;
                 if !guidance.is_empty() {
                     let merge = append_guidance_messages(
@@ -1380,101 +1441,6 @@ fn contains_any(content: &str, needles: &[&str]) -> bool {
         .any(|needle| content.contains(needle) || lower.contains(&needle.to_ascii_lowercase()))
 }
 
-fn should_advertise_tools_for_turn(
-    user_input: &str,
-    has_active_skills: bool,
-    has_attachments: bool,
-) -> bool {
-    if has_active_skills || has_attachments {
-        return true;
-    }
-    let text = user_input.trim();
-    if text.is_empty() {
-        return false;
-    }
-
-    let normalized = text.to_ascii_lowercase();
-    let simple_greetings = [
-        "hi",
-        "hello",
-        "hey",
-        "你好",
-        "您好",
-        "嗨",
-        "在吗",
-        "早上好",
-        "晚上好",
-    ];
-    if text.chars().count() <= 16
-        && simple_greetings
-            .iter()
-            .any(|greeting| normalized == *greeting || text == *greeting)
-    {
-        return false;
-    }
-
-    let tool_intent_markers = [
-        "文件",
-        "目录",
-        "项目",
-        "代码",
-        "脚本",
-        "终端",
-        "命令",
-        "运行",
-        "执行",
-        "读取",
-        "查看",
-        "搜索",
-        "联网",
-        "网页",
-        "浏览器",
-        "截图",
-        "上下文",
-        "ocr",
-        "mcp",
-        "修改",
-        "修复",
-        "创建",
-        "保存",
-        "删除",
-        "测试",
-        "验证",
-        "继续",
-        "完成",
-        "agent",
-        "repo",
-        "repository",
-        "project",
-        "file",
-        "folder",
-        "directory",
-        "code",
-        "terminal",
-        "command",
-        "run",
-        "execute",
-        "read",
-        "search",
-        "browse",
-        "screenshot",
-        "context",
-        "edit",
-        "fix",
-        "create",
-        "save",
-        "delete",
-        "test",
-        "verify",
-        "continue",
-        "complete",
-    ];
-
-    tool_intent_markers
-        .iter()
-        .any(|marker| normalized.contains(marker) || text.contains(marker))
-}
-
 fn emit_failed(event_tx: &Sender<AgentEvent>, run_id: &str, error: &AgentError) {
     if matches!(error, AgentError::Cancelled) {
         emit_event(
@@ -1826,28 +1792,48 @@ mod tests {
 
     #[test]
     fn simple_greeting_does_not_advertise_tools() {
-        assert!(!should_advertise_tools_for_turn("你好", false, false));
-        assert!(!should_advertise_tools_for_turn("hello", false, false));
+        let zh = build_tool_exposure_plan(
+            classify_task_intent("你好", false, &[]),
+            true,
+            true,
+            false,
+            false,
+        );
+        let en = build_tool_exposure_plan(
+            classify_task_intent("hello", false, &[]),
+            true,
+            true,
+            false,
+            false,
+        );
+        assert!(!zh.advertise_tools);
+        assert!(!en.advertise_tools);
     }
 
     #[test]
     fn task_language_advertises_tools() {
-        assert!(should_advertise_tools_for_turn(
+        for input in [
             "帮我读取项目文件并修复 bug",
-            false,
-            false
-        ));
-        assert!(should_advertise_tools_for_turn(
             "continue the task",
-            false,
-            false
-        ));
-        assert!(should_advertise_tools_for_turn(
             "context probe",
+        ] {
+            let plan = build_tool_exposure_plan(
+                classify_task_intent(input, false, &[]),
+                true,
+                true,
+                false,
+                false,
+            );
+            assert!(plan.advertise_tools, "{input} should expose tools");
+        }
+        let skill_plan = build_tool_exposure_plan(
+            classify_task_intent("你好", true, &[]),
+            true,
+            true,
             false,
-            false
-        ));
-        assert!(should_advertise_tools_for_turn("你好", true, false));
+            false,
+        );
+        assert!(skill_plan.advertise_tools);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use crate::agent::{
-    AgentAttachment, AgentError, AgentEvent, ChatCompletionOptions, ChatResponse, LLMClient,
-    Message, ModelTokenUsage, Role, ToolSchema,
+    chat_response_content_for_tool_turn, is_potential_pseudo_tool_buffer, normalize_tool_call,
+    parse_pseudo_tool_calls, AgentAttachment, AgentError, AgentEvent, ChatCompletionOptions,
+    ChatResponse, LLMClient, Message, ModelTokenUsage, Role, ToolCallSource, ToolSchema,
 };
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -424,12 +425,10 @@ impl LLMClient for OpenAIClient {
         let openai_messages = to_openai_messages(request_messages, self.vision_supported);
         let tools_for_fallback = tools.clone();
         let openai_tools = openai_tools_from_schemas(tools);
-        let visible_summary = visible_work_summary(
-            &openai_messages,
-            openai_tools
-                .as_ref()
-                .is_some_and(|tools: &Vec<OpenAITool>| !tools.is_empty()),
-        );
+        let tools_exposed = openai_tools
+            .as_ref()
+            .is_some_and(|tools: &Vec<OpenAITool>| !tools.is_empty());
+        let visible_summary = visible_work_summary(&openai_messages, tools_exposed);
 
         let request = OpenAIRequest {
             model: self.model.clone(),
@@ -532,14 +531,16 @@ impl LLMClient for OpenAIClient {
                             error
                         }
                     })?;
-                if let Some(content) = &response.content {
-                    event_tx
-                        .send(AgentEvent::ResponseCompleted {
-                            message_id,
-                            content: content.clone(),
-                        })
-                        .await
-                        .map_err(|_| AgentError::Cancelled)?;
+                if response.tool_calls.is_empty() {
+                    if let Some(content) = &response.content {
+                        event_tx
+                            .send(AgentEvent::ResponseCompleted {
+                                message_id,
+                                content: content.clone(),
+                            })
+                            .await
+                            .map_err(|_| AgentError::Cancelled)?;
+                    }
                 }
                 return Ok(response);
             }
@@ -626,14 +627,16 @@ impl LLMClient for OpenAIClient {
                             let response = self
                                 .chat_completion_with_options(messages, tools_for_fallback, options)
                                 .await?;
-                            if let Some(content) = &response.content {
-                                event_tx
-                                    .send(AgentEvent::ResponseCompleted {
-                                        message_id,
-                                        content: content.clone(),
-                                    })
-                                    .await
-                                    .map_err(|_| AgentError::Cancelled)?;
+                            if response.tool_calls.is_empty() {
+                                if let Some(content) = &response.content {
+                                    event_tx
+                                        .send(AgentEvent::ResponseCompleted {
+                                            message_id,
+                                            content: content.clone(),
+                                        })
+                                        .await
+                                        .map_err(|_| AgentError::Cancelled)?;
+                                }
                             }
                             return Ok(response);
                         }
@@ -652,7 +655,7 @@ impl LLMClient for OpenAIClient {
                     if let Some(delta) = choice.delta.content {
                         if !delta.is_empty() {
                             content.push_str(&delta);
-                            if !response_started {
+                            if !tools_exposed && !response_started {
                                 event_tx
                                     .send(AgentEvent::ResponseStarted {
                                         message_id: message_id.clone(),
@@ -661,13 +664,15 @@ impl LLMClient for OpenAIClient {
                                     .map_err(|_| AgentError::Cancelled)?;
                                 response_started = true;
                             }
-                            event_tx
-                                .send(AgentEvent::ResponseDelta {
-                                    message_id: message_id.clone(),
-                                    content: delta,
-                                })
-                                .await
-                                .map_err(|_| AgentError::Cancelled)?;
+                            if !tools_exposed {
+                                event_tx
+                                    .send(AgentEvent::ResponseDelta {
+                                        message_id: message_id.clone(),
+                                        content: delta,
+                                    })
+                                    .await
+                                    .map_err(|_| AgentError::Cancelled)?;
+                            }
                         }
                     }
                     for tool_call in choice.delta.tool_calls {
@@ -743,20 +748,22 @@ impl LLMClient for OpenAIClient {
                 .all(|builder| builder.name.trim().is_empty())
         {
             if let Ok(response) = parse_openai_response_text(raw_fallback_payload.trim()) {
-                if let Some(content) = &response.content {
-                    event_tx
-                        .send(AgentEvent::ResponseStarted {
-                            message_id: message_id.clone(),
-                        })
-                        .await
-                        .map_err(|_| AgentError::Cancelled)?;
-                    event_tx
-                        .send(AgentEvent::ResponseCompleted {
-                            message_id,
-                            content: content.clone(),
-                        })
-                        .await
-                        .map_err(|_| AgentError::Cancelled)?;
+                if response.tool_calls.is_empty() {
+                    if let Some(content) = &response.content {
+                        event_tx
+                            .send(AgentEvent::ResponseStarted {
+                                message_id: message_id.clone(),
+                            })
+                            .await
+                            .map_err(|_| AgentError::Cancelled)?;
+                        event_tx
+                            .send(AgentEvent::ResponseCompleted {
+                                message_id,
+                                content: content.clone(),
+                            })
+                            .await
+                            .map_err(|_| AgentError::Cancelled)?;
+                    }
                 }
                 return Ok(response);
             }
@@ -780,7 +787,97 @@ impl LLMClient for OpenAIClient {
             let response = self
                 .chat_completion_with_options(messages, tools_for_fallback, options)
                 .await?;
-            if let Some(content) = &response.content {
+            if response.tool_calls.is_empty() {
+                if let Some(content) = &response.content {
+                    event_tx
+                        .send(AgentEvent::ResponseCompleted {
+                            message_id,
+                            content: content.clone(),
+                        })
+                        .await
+                        .map_err(|_| AgentError::Cancelled)?;
+                }
+            }
+            return Ok(response);
+        }
+
+        let mut tool_calls = tool_builders
+            .into_iter()
+            .filter(|builder| !builder.name.trim().is_empty())
+            .enumerate()
+            .map(|(index, builder)| {
+                let raw = crate::agent::ToolCall {
+                    id: if builder.id.is_empty() {
+                        format!("stream_tool_{index}")
+                    } else {
+                        builder.id
+                    },
+                    name: builder.name,
+                    arguments: serde_json::from_str(&builder.arguments)
+                        .unwrap_or(serde_json::json!({})),
+                };
+                normalize_tool_call(raw, ToolCallSource::StreamingStandard).0
+            })
+            .collect::<Vec<_>>();
+
+        if tool_calls.is_empty() && tools_exposed && !content.trim().is_empty() {
+            let parsed =
+                parse_pseudo_tool_calls(Some(&content), false, ToolCallSource::StreamingText);
+            if !parsed.is_empty() {
+                event_tx
+                    .send(AgentEvent::ModelToolParseDiagnostic {
+                        returned_kind: "streaming_text_pseudo_tool_call".to_string(),
+                        parsed: true,
+                        reason: None,
+                    })
+                    .await
+                    .map_err(|_| AgentError::Cancelled)?;
+                tool_calls = parsed;
+                content.clear();
+            } else if is_potential_pseudo_tool_buffer(&content) {
+                event_tx
+                    .send(AgentEvent::ModelToolParseDiagnostic {
+                        returned_kind: "streaming_text_pseudo_tool_call".to_string(),
+                        parsed: false,
+                        reason: Some("pseudo_tool_protocol_parse_failed".to_string()),
+                    })
+                    .await
+                    .map_err(|_| AgentError::Cancelled)?;
+            }
+        }
+
+        let response_content = chat_response_content_for_tool_turn(
+            if content.is_empty() {
+                None
+            } else {
+                Some(content)
+            },
+            tool_calls.is_empty(),
+        );
+
+        if response_started && tool_calls.is_empty() {
+            event_tx
+                .send(AgentEvent::ResponseCompleted {
+                    message_id: message_id.clone(),
+                    content: response_content.clone().unwrap_or_default(),
+                })
+                .await
+                .map_err(|_| AgentError::Cancelled)?;
+        } else if !response_started {
+            if let Some(content) = &response_content {
+                event_tx
+                    .send(AgentEvent::ResponseStarted {
+                        message_id: message_id.clone(),
+                    })
+                    .await
+                    .map_err(|_| AgentError::Cancelled)?;
+                event_tx
+                    .send(AgentEvent::ResponseDelta {
+                        message_id: message_id.clone(),
+                        content: content.clone(),
+                    })
+                    .await
+                    .map_err(|_| AgentError::Cancelled)?;
                 event_tx
                     .send(AgentEvent::ResponseCompleted {
                         message_id,
@@ -789,41 +886,10 @@ impl LLMClient for OpenAIClient {
                     .await
                     .map_err(|_| AgentError::Cancelled)?;
             }
-            return Ok(response);
-        }
-
-        let tool_calls = tool_builders
-            .into_iter()
-            .filter(|builder| !builder.name.trim().is_empty())
-            .enumerate()
-            .map(|(index, builder)| crate::agent::ToolCall {
-                id: if builder.id.is_empty() {
-                    format!("stream_tool_{index}")
-                } else {
-                    builder.id
-                },
-                name: builder.name,
-                arguments: serde_json::from_str(&builder.arguments)
-                    .unwrap_or(serde_json::json!({})),
-            })
-            .collect::<Vec<_>>();
-
-        if response_started {
-            event_tx
-                .send(AgentEvent::ResponseCompleted {
-                    message_id,
-                    content: content.clone(),
-                })
-                .await
-                .map_err(|_| AgentError::Cancelled)?;
         }
 
         Ok(ChatResponse {
-            content: if content.is_empty() {
-                None
-            } else {
-                Some(content)
-            },
+            content: response_content,
             tool_calls,
             finish_reason,
             usage,
@@ -860,126 +926,39 @@ fn openai_response_to_chat(openai_response: OpenAIResponse) -> Result<ChatRespon
         .message
         .tool_calls
         .into_iter()
-        .map(|tc| crate::agent::ToolCall {
-            id: tc.id,
-            name: tc.function.name,
-            arguments: normalize_tool_arguments(
-                serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({})),
-            ),
+        .map(|tc| {
+            let raw = crate::agent::ToolCall {
+                id: tc.id,
+                name: tc.function.name,
+                arguments: serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or(serde_json::json!({})),
+            };
+            normalize_tool_call(raw, ToolCallSource::Standard).0
         })
         .collect();
     if tool_calls.is_empty() {
-        tool_calls = fallback_text_tool_calls(
-            choice.message.content.as_deref(),
-            &choice.finish_reason,
+        let finish = choice.finish_reason.trim().to_ascii_lowercase();
+        let requires_tool_finish = matches!(
+            finish.as_str(),
+            "tool_calls" | "tool_call" | "function_call" | "tool_use"
         );
+        if requires_tool_finish {
+            tool_calls = parse_pseudo_tool_calls(
+                choice.message.content.as_deref(),
+                true,
+                ToolCallSource::TextJson,
+            );
+        }
     }
+    let content =
+        chat_response_content_for_tool_turn(choice.message.content, tool_calls.is_empty());
 
     Ok(ChatResponse {
-        content: choice.message.content,
+        content,
         tool_calls,
         finish_reason: choice.finish_reason,
         usage: openai_response.usage.and_then(openai_usage_to_model_usage),
     })
-}
-
-fn fallback_text_tool_calls(content: Option<&str>, finish_reason: &str) -> Vec<crate::agent::ToolCall> {
-    let finish = finish_reason.trim().to_ascii_lowercase();
-    if !matches!(
-        finish.as_str(),
-        "tool_calls" | "tool_call" | "function_call" | "tool_use"
-    ) {
-        return Vec::new();
-    }
-    let Some(content) = content.map(str::trim).filter(|value| value.starts_with('{')) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
-        return Vec::new();
-    };
-
-    let mut calls = Vec::new();
-    if let Some(items) = value.get("tool_calls").and_then(|value| value.as_array()) {
-        for item in items {
-            if let Some(call) = fallback_text_tool_call(item, calls.len()) {
-                calls.push(call);
-            }
-        }
-    } else if let Some(item) = value.get("tool_call") {
-        if let Some(call) = fallback_text_tool_call(item, 0) {
-            calls.push(call);
-        }
-    }
-    calls
-}
-
-fn fallback_text_tool_call(
-    value: &serde_json::Value,
-    index: usize,
-) -> Option<crate::agent::ToolCall> {
-    let name = value
-        .get("function")
-        .and_then(|function| function.get("name"))
-        .or_else(|| value.get("name"))
-        .and_then(|value| value.as_str())?
-        .trim();
-    if !is_safe_tool_name(name) {
-        return None;
-    }
-    let id = value
-        .get("id")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("text_tool_call_{index}"));
-    let arguments = value
-        .get("function")
-        .and_then(|function| function.get("arguments"))
-        .or_else(|| value.get("arguments"))
-        .map(parse_tool_arguments_value)
-        .map(normalize_tool_arguments)
-        .unwrap_or_else(|| serde_json::json!({}));
-    Some(crate::agent::ToolCall {
-        id,
-        name: name.to_string(),
-        arguments,
-    })
-}
-
-fn parse_tool_arguments_value(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::String(text) => serde_json::from_str(text).unwrap_or_else(|_| {
-            serde_json::json!({
-                "value": text
-            })
-        }),
-        serde_json::Value::Object(_) => value.clone(),
-        _ => serde_json::json!({}),
-    }
-}
-
-fn normalize_tool_arguments(mut value: serde_json::Value) -> serde_json::Value {
-    let Some(object) = value.as_object_mut() else {
-        return value;
-    };
-    if object.contains_key("limit") {
-        return value;
-    }
-    for alias in ["numResults", "num_results", "maxResults", "max_results"] {
-        if let Some(limit) = object.get(alias).cloned() {
-            object.insert("limit".to_string(), limit);
-            break;
-        }
-    }
-    value
-}
-
-fn is_safe_tool_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 96
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 async fn openai_error_details(response: reqwest::Response) -> String {
@@ -1476,6 +1455,7 @@ mod tests {
         assert_eq!(chat.tool_calls[0].name, "search_web");
         assert_eq!(chat.tool_calls[0].arguments["query"], "Atlas");
         assert_eq!(chat.tool_calls[0].arguments["limit"], 3);
+        assert!(chat.content.is_none());
     }
 
     #[test]
@@ -1868,6 +1848,63 @@ mod tests {
             }
         }
         assert!(saw_completed);
+    }
+
+    #[tokio::test]
+    async fn streaming_xml_like_tool_call_is_buffered_and_not_sent_to_ui() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.contains("\"stream\":true"));
+            assert!(request.contains("\"tools\""));
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"<tool_call><name>web_search</name><arguments>{\\\"query\\\":\\\"mimo vision\\\",\\\"numResults\\\":3}</arguments></tool_call>\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = OpenAIClient::new("test-key".to_string(), "test-model".to_string())
+            .with_base_url(format!("http://{addr}"));
+        let (tx, mut rx) = mpsc::channel(16);
+        let result = client
+            .chat_completion_stream(
+                vec![Message::plain(
+                    Role::User,
+                    "你上网查查 mimo 的哪个模型可以识别图片",
+                )],
+                Some(vec![ToolSchema {
+                    name: "search_web".to_string(),
+                    description: "Search the web".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                }]),
+                Some(tx),
+            )
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+        assert!(result.content.is_none());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "search_web");
+        assert_eq!(result.tool_calls[0].arguments["query"], "mimo vision");
+        assert_eq!(result.tool_calls[0].arguments["limit"], 3);
+
+        while let Ok(Some(event)) = timeout(Duration::from_millis(100), rx.recv()).await {
+            match event {
+                AgentEvent::ResponseDelta { content, .. }
+                | AgentEvent::ResponseCompleted { content, .. } => {
+                    assert!(
+                        !content.contains("<tool_call>"),
+                        "raw tool protocol must not reach UI events"
+                    );
+                }
+                _ => {}
+            }
+        }
     }
 
     #[tokio::test]

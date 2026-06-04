@@ -349,6 +349,26 @@ pub enum AgentEvent {
     ToolResult {
         result: String,
     },
+    ToolVisibilityDecision {
+        tools_enabled: bool,
+        intent: String,
+        advertised_tools: Vec<String>,
+        hidden_reason: Option<String>,
+    },
+    ModelToolParseDiagnostic {
+        returned_kind: String,
+        parsed: bool,
+        reason: Option<String>,
+    },
+    UnknownToolRequested {
+        requested: String,
+        nearest: Option<String>,
+    },
+    ToolNormalizationApplied {
+        original_name: String,
+        normalized_name: String,
+        argument_changes: Vec<String>,
+    },
     RunEvent {
         event: AgentRunEvent,
     },

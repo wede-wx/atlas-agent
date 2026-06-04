@@ -272,6 +272,19 @@ pub fn create_llm_client(
     let vision_supported = resolved_caps.as_ref().map(|cap| cap.vision);
     let tool_calls_supported = resolved_caps.as_ref().map(|cap| cap.tool_calls);
     let json_mode_supported = resolved_caps.as_ref().map(|cap| cap.json_mode);
+    let tool_protocol_caps = resolved_caps.as_ref().map(|cap| cap.tool_protocol_caps());
+    let protocol_vision_supported = tool_protocol_caps.as_ref().map(|caps| {
+        !matches!(
+            caps.vision_input_format,
+            crate::agent::VisionInputFormat::None
+        )
+    });
+    let protocol_tool_calls_supported = tool_protocol_caps
+        .as_ref()
+        .map(|caps| caps.structured_tool_calls);
+    let protocol_json_mode_supported = tool_protocol_caps
+        .as_ref()
+        .map(|caps| caps.supports_json_response_format);
 
     // P0-3: provider-API outbound sub-boundary. Validate the effective endpoint
     // before building a client that will POST to it. The provider channel allows
@@ -307,9 +320,9 @@ pub fn create_llm_client(
             let mut client =
                 OpenAIClient::new(connection.api_key.clone(), connection.model.clone())
                     .with_auth_header(connection.auth_header.clone())
-                    .with_vision_support(vision_supported)
-                    .with_tool_call_support(tool_calls_supported)
-                    .with_json_mode_supported(json_mode_supported);
+                    .with_vision_support(protocol_vision_supported.or(vision_supported))
+                    .with_tool_call_support(protocol_tool_calls_supported.or(tool_calls_supported))
+                    .with_json_mode_supported(protocol_json_mode_supported.or(json_mode_supported));
             if let Some(base_url) = &connection.base_url {
                 client = client.with_base_url(crate::config::normalize_base_url(base_url));
             }
@@ -318,8 +331,8 @@ pub fn create_llm_client(
         "anthropic" => {
             let mut client =
                 AnthropicClient::new(connection.api_key.clone(), connection.model.clone())
-                    .with_vision_support(vision_supported)
-                    .with_tool_call_support(tool_calls_supported);
+                    .with_vision_support(protocol_vision_supported.or(vision_supported))
+                    .with_tool_call_support(protocol_tool_calls_supported.or(tool_calls_supported));
             if let Some(base_url) = &connection.base_url {
                 client = client.with_base_url(crate::config::normalize_base_url(base_url));
             }

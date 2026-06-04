@@ -256,6 +256,21 @@ impl ToolRegistry {
         self.tools.get(name).map(|tool| tool.metadata())
     }
 
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
+    pub fn nearest_tool_name(&self, requested: &str) -> Option<String> {
+        let requested = requested.trim();
+        if requested.is_empty() {
+            return None;
+        }
+        self.tools
+            .keys()
+            .min_by_key(|candidate| tool_name_distance(requested, candidate))
+            .cloned()
+    }
+
     pub fn metadata_issues(&self) -> Vec<ToolMetadataIssue> {
         let mut issues = Vec::new();
         for tool in self.tools.values() {
@@ -402,6 +417,22 @@ impl ToolRegistry {
         tool.execute_with_context(tool_call.arguments.clone(), context)
             .await
     }
+}
+
+fn tool_name_distance(a: &str, b: &str) -> usize {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let mut prev = (0..=b.len()).collect::<Vec<_>>();
+    let mut curr = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 fn metadata_issue(

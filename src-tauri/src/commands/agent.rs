@@ -2907,6 +2907,105 @@ fn persist_agent_event(
                 parsed,
             );
         }
+        AgentEvent::ToolVisibilityDecision {
+            tools_enabled,
+            intent,
+            advertised_tools,
+            hidden_reason,
+        } => {
+            let summary = if advertised_tools.is_empty() {
+                format!(
+                    "工具可见性：intent={intent}，未暴露工具{}。",
+                    hidden_reason
+                        .as_deref()
+                        .map(|reason| format!("，reason={reason}"))
+                        .unwrap_or_default()
+                )
+            } else {
+                format!(
+                    "工具可见性：intent={intent}，暴露 {} 个工具。",
+                    advertised_tools.len()
+                )
+            };
+            let _ = db.append_agent_run_step(
+                fallback_run_id,
+                "diagnostic",
+                "finished",
+                &summary,
+                serde_json::json!({
+                    "kind": "ToolVisibilityDecision",
+                    "toolsEnabled": tools_enabled,
+                    "intent": intent,
+                    "advertisedTools": advertised_tools,
+                    "hiddenReason": hidden_reason,
+                }),
+                serde_json::json!({}),
+            );
+        }
+        AgentEvent::ModelToolParseDiagnostic {
+            returned_kind,
+            parsed,
+            reason,
+        } => {
+            let summary = format!(
+                "模型工具协议解析：kind={returned_kind}，parsed={parsed}{}。",
+                reason
+                    .as_deref()
+                    .map(|reason| format!("，reason={reason}"))
+                    .unwrap_or_default()
+            );
+            let _ = db.append_agent_run_step(
+                fallback_run_id,
+                "diagnostic",
+                "finished",
+                &summary,
+                serde_json::json!({
+                    "kind": "ModelToolParseDiagnostic",
+                    "returnedKind": returned_kind,
+                    "parsed": parsed,
+                    "reason": reason,
+                }),
+                serde_json::json!({}),
+            );
+        }
+        AgentEvent::UnknownToolRequested { requested, nearest } => {
+            let summary = nearest
+                .as_deref()
+                .map(|nearest| format!("模型请求了未知工具：{requested}，最近候选：{nearest}。"))
+                .unwrap_or_else(|| format!("模型请求了未知工具：{requested}。"));
+            let _ = db.append_agent_run_step(
+                fallback_run_id,
+                "diagnostic",
+                "failed",
+                &summary,
+                serde_json::json!({
+                    "kind": "UnknownToolRequested",
+                    "requested": requested,
+                    "nearest": nearest,
+                }),
+                serde_json::json!({}),
+            );
+        }
+        AgentEvent::ToolNormalizationApplied {
+            original_name,
+            normalized_name,
+            argument_changes,
+        } => {
+            let summary = format!("工具调用已归一化：{original_name} -> {normalized_name}。");
+            let _ = db.append_agent_run_step(
+                fallback_run_id,
+                "diagnostic",
+                "finished",
+                &summary,
+                serde_json::json!({
+                    "kind": "ToolNormalizationApplied",
+                    "originalName": original_name,
+                    "normalizedName": normalized_name,
+                    "argumentChanges": argument_changes,
+                }),
+                serde_json::json!({}),
+            );
+        }
         AgentEvent::OperationPreparing {
             label,
             detail,
@@ -3315,7 +3414,10 @@ fn context_usage_snapshot_for_message(
         attachments,
     );
     let used_tokens = estimate_context_window_tokens(&prompt_messages);
-    let message_count = db.get_messages(session_id).map_err(|e| e.to_string())?.len();
+    let message_count = db
+        .get_messages(session_id)
+        .map_err(|e| e.to_string())?
+        .len();
     let compression_state = if summary_included {
         "compressed"
     } else if used_tokens >= ATLAS_CONTEXT_COMPRESSION_TRIGGER_TOKENS {
@@ -3343,20 +3445,26 @@ fn ensure_context_window_compressed_for_send(
     current_message: &str,
     attachments: Vec<AgentAttachment>,
 ) -> Result<(), String> {
-    let snapshot =
-        context_usage_snapshot_for_message(db, session_id, agent_mode, current_message, attachments)?;
+    let snapshot = context_usage_snapshot_for_message(
+        db,
+        session_id,
+        agent_mode,
+        current_message,
+        attachments,
+    )?;
     if snapshot.used_tokens >= ATLAS_CONTEXT_COMPRESSION_TRIGGER_TOKENS {
-        db.summarize_session(session_id).map_err(|e| e.to_string())?;
+        db.summarize_session(session_id)
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
 fn context_has_summary(messages: &[Message]) -> bool {
     messages.iter().any(|message| {
-        message
-            .content
-            .contains("summaryIncluded=true")
-            || message.content.starts_with("以下是本会话较早内容的压缩摘要")
+        message.content.contains("summaryIncluded=true")
+            || message
+                .content
+                .starts_with("以下是本会话较早内容的压缩摘要")
     })
 }
 

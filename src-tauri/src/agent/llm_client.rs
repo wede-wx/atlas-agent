@@ -86,11 +86,13 @@ pub trait LLMClient: Send + Sync {
         let response = self
             .chat_completion_with_options(messages, tools, options)
             .await?;
-        if let (Some(tx), Some(content)) = (&event_tx, &response.content) {
-            let _ = tx.try_send(AgentEvent::ResponseCompleted {
-                message_id,
-                content: content.clone(),
-            });
+        if response.tool_calls.is_empty() {
+            if let (Some(tx), Some(content)) = (&event_tx, &response.content) {
+                let _ = tx.try_send(AgentEvent::ResponseCompleted {
+                    message_id,
+                    content: content.clone(),
+                });
+            }
         }
         Ok(response)
     }

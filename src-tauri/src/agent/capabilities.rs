@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
+use crate::agent::{ProviderToolProtocolCaps, PseudoToolFormat, VisionInputFormat};
 use crate::storage::{LocalDb, ProviderCapabilitiesRow, StorageError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +80,50 @@ impl ProviderCapabilities {
             missing.push("tool_calls");
         }
         missing
+    }
+
+    /// Runtime Contract V2 capability view.
+    ///
+    /// This is intentionally derived from the existing persisted fields so old
+    /// rows and settings continue to round-trip without a migration. Provider
+    /// adapters can use this richer protocol surface while legacy UI/storage
+    /// still reads `vision/tool_calls/json_mode/max_context`.
+    pub fn tool_protocol_caps(&self) -> ProviderToolProtocolCaps {
+        let provider = canonical_provider_id(&self.provider_id);
+        let is_openai_compatible = matches!(
+            provider.as_ref(),
+            "openai"
+                | "deepseek"
+                | "xiaomi-mimo"
+                | "qwen"
+                | "doubao"
+                | "hunyuan"
+                | "ernie"
+                | "zhipu"
+                | "kimi"
+                | "minimax"
+                | "openrouter"
+                | "siliconflow"
+                | "lmstudio"
+        );
+        let is_anthropic = provider.as_ref() == "anthropic";
+
+        ProviderToolProtocolCaps {
+            structured_tool_calls: self.tool_calls,
+            streaming_tool_calls: self.tool_calls && is_openai_compatible,
+            pseudo_tool_call_format: self.tool_calls.then_some(PseudoToolFormat::Json),
+            supports_tool_choice: self.tool_calls && is_openai_compatible,
+            supports_parallel_tools: self.tool_calls && is_openai_compatible,
+            supports_tool_result_role: self.tool_calls && is_openai_compatible,
+            supports_json_response_format: self.json_mode,
+            vision_input_format: if !self.vision {
+                VisionInputFormat::None
+            } else if is_anthropic {
+                VisionInputFormat::AnthropicImageBlock
+            } else {
+                VisionInputFormat::OpenAiImageUrl
+            },
+        }
     }
 }
 
