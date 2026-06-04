@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+target/
+coverage/
+out/
+output/
+
+# Local runtime data
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+*.log
+tmp/
+temp/
+
+# Tool caches
+.playwright-cli/
+.cache/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
