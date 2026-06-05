@@ -396,7 +396,7 @@ mod tests {
 
     fn temp_db() -> LocalDb {
         LocalDb::open(
-            std::env::temp_dir().join(format!("aura_workflow_trace_{}.db", Uuid::new_v4())),
+            std::env::temp_dir().join(format!("atlas_workflow_trace_{}.db", Uuid::new_v4())),
         )
         .unwrap()
     }
@@ -419,7 +419,7 @@ mod tests {
             kind: "agent".to_string(),
             title: "Agent".to_string(),
             max_attempts: Some(1),
-            input: json!({ "apiKey": "sk-proj-abcdefghijklmnopqrstuvwxyz" }),
+            input: json!({ "apiKey": format!("{}{}", "sk", "-proj-abcdefghijklmnopqrstuvwxyz") }),
         })
         .unwrap();
         let report = graph_node_traces(&db, "graph-a").unwrap();

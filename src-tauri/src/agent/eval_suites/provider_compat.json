@@ -1,0 +1,111 @@
+{
+  "id": "provider_compat_matrix",
+  "name": "Provider Compatibility Matrix",
+  "kind": "provider_compat",
+  "description": "Compatibility tasks for OpenAI, Anthropic, OpenAI-compatible local servers, Ollama, and LM Studio.",
+  "exitGate": {
+    "minCases": 6,
+    "minPassRate": 0.85,
+    "maxFalseCompletionRate": 0.0,
+    "requireAllCritical": true,
+    "requiredTags": ["provider", "capability_probe", "fallback"]
+  },
+  "cases": [
+    {
+      "id": "prov-openai-tool-json",
+      "title": "OpenAI tool call and JSON mode",
+      "category": "openai",
+      "tags": ["critical", "provider", "capability_probe"],
+      "prompt": "Route a task requiring tool calls and JSON mode to an OpenAI-compatible model with both capabilities.",
+      "setup": ["Seed OpenAI capability row with toolCalls=true and jsonMode=true."],
+      "allowedProviders": ["openai"],
+      "expected": ["Route requires toolCalls and jsonMode", "OpenAI row is selected", "Usage is recorded when returned"],
+      "forbidden": ["Selecting a provider without required capability"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib model_routing", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Route decision includes provider id and capability requirements."],
+        "successCriteria": ["Provider selection is capability-gated."]
+      }
+    },
+    {
+      "id": "prov-anthropic-tool",
+      "title": "Anthropic tool call shape",
+      "category": "anthropic",
+      "tags": ["provider", "capability_probe"],
+      "prompt": "Execute a simple tool-call task through Anthropic message format and normalize the tool result into the same agent event stream.",
+      "setup": ["Use an Anthropic-compatible mock response with tool_use and tool_result blocks."],
+      "allowedProviders": ["anthropic"],
+      "expected": ["Tool call id is preserved", "Tool result maps to AgentRunEvent", "Final text is captured"],
+      "forbidden": ["Dropping tool call ids"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib anthropic", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Normalized event contains toolCallId."],
+        "successCriteria": ["Anthropic format is normalized without losing audit identity."]
+      }
+    },
+    {
+      "id": "prov-ollama-no-usage",
+      "title": "Ollama no-usage accounting",
+      "category": "ollama",
+      "tags": ["critical", "provider"],
+      "prompt": "Run a local Ollama path that returns no token usage and verify estimated usage is recorded with source marked estimated.",
+      "setup": ["Use an Ollama-compatible no-usage fixture."],
+      "allowedProviders": ["ollama"],
+      "expected": ["Usage source is estimated", "Budget policy sees non-zero estimate", "Report does not call it API usage"],
+      "forbidden": ["Recording zero tokens for a real response"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib token_budget", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["model_usage_events source is model_estimated_usage or equivalent."],
+        "successCriteria": ["No-usage local provider still counts against budget."]
+      }
+    },
+    {
+      "id": "prov-lmstudio-openai-compatible",
+      "title": "LM Studio OpenAI-compatible endpoint",
+      "category": "lmstudio",
+      "tags": ["provider", "capability_probe"],
+      "prompt": "Probe an LM Studio OpenAI-compatible endpoint and store capabilities without treating it as cloud OpenAI.",
+      "setup": ["Use local endpoint fixture metadata."],
+      "allowedProviders": ["lmstudio"],
+      "expected": ["Provider id remains lmstudio", "Capability source is probe or override", "Route can select it when requirements match"],
+      "forbidden": ["Conflating local provider with OpenAI billing or usage semantics"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib capabilities", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Capability audit contains provider id lmstudio."],
+        "successCriteria": ["Local OpenAI-compatible providers remain distinguishable."]
+      }
+    },
+    {
+      "id": "prov-fallback-skip-incompatible",
+      "title": "Fallback skips incompatible provider",
+      "category": "fallback",
+      "tags": ["critical", "fallback", "provider"],
+      "prompt": "Configure a fallback chain where the first provider lacks vision but the task requires vision, then verify routing skips it.",
+      "setup": ["Seed one provider with vision=false and one with vision=true."],
+      "allowedProviders": ["openai", "anthropic", "ollama", "lmstudio"],
+      "expected": ["Vision requirement is explicit", "Incompatible provider is skipped", "Fallback reason is audited"],
+      "forbidden": ["Trying providers only by order without capability check"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib fallback", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Fallback audit records skipped provider and reason."],
+        "successCriteria": ["Fallback respects task capability requirements."]
+      }
+    },
+    {
+      "id": "prov-json-unsupported-disclose",
+      "title": "Disclose unsupported JSON mode",
+      "category": "capability_error",
+      "tags": ["provider", "capability_probe"],
+      "prompt": "Run a task that requires JSON mode against a provider marked jsonMode=false and verify the run blocks with a clear reason.",
+      "setup": ["Seed only one provider with jsonMode=false."],
+      "allowedProviders": ["ollama", "lmstudio"],
+      "expected": ["Run does not silently downgrade", "Error explains missing JSON mode", "Final status is blocked or failed"],
+      "forbidden": ["Pretending JSON contract was satisfied with free-form text"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib model_routing", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Routing failure reason names jsonMode."],
+        "successCriteria": ["Capability mismatch is explicit."]
+      }
+    }
+  ]
+}

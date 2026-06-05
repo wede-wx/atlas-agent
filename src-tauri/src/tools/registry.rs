@@ -223,6 +223,33 @@ impl ToolRegistry {
             .collect()
     }
 
+    pub fn list_schemas_for_policy_allowlist_and_expected(
+        &self,
+        policy: &ToolAccessPolicy,
+        allowlist: Option<&BTreeSet<String>>,
+        expected_tools: Option<&BTreeSet<String>>,
+        subagent_role: Option<SubAgentRole>,
+    ) -> Vec<ToolSchema> {
+        self.tools
+            .values()
+            .filter(|tool| {
+                let metadata = tool.metadata();
+                let decision = match subagent_role {
+                    Some(role) => role.restrict(policy.metadata_decision(&metadata), &metadata),
+                    None => policy.metadata_decision(&metadata),
+                };
+                decision.is_visible_without_runtime_approval()
+                    && allowlist
+                        .map(|allowed| allowed.contains(tool.name()))
+                        .unwrap_or(true)
+                    && expected_tools
+                        .map(|expected| expected.contains(tool.name()))
+                        .unwrap_or(true)
+            })
+            .map(|tool| tool.schema())
+            .collect()
+    }
+
     pub fn list_metadata(&self) -> Vec<ToolMetadata> {
         self.tools.values().map(|t| t.metadata()).collect()
     }
@@ -596,6 +623,47 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn expected_tool_filter_limits_advertised_schemas() {
+        struct ReadTool;
+
+        #[async_trait]
+        impl Tool for ReadTool {
+            fn name(&self) -> &str {
+                "read_file"
+            }
+
+            fn description(&self) -> &str {
+                "read test tool"
+            }
+
+            fn schema(&self) -> ToolSchema {
+                ToolSchema {
+                    name: self.name().to_string(),
+                    description: self.description().to_string(),
+                    parameters: serde_json::json!({ "type": "object" }),
+                }
+            }
+
+            async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult, AgentError> {
+                Ok(ToolResult::success("ok", serde_json::json!({})))
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(ReadTool));
+        registry.register(Box::new(MetadataTool));
+        let expected = BTreeSet::from(["read_file".to_string()]);
+        let schemas = registry.list_schemas_for_policy_allowlist_and_expected(
+            &ToolAccessPolicy::FullAccess,
+            None,
+            Some(&expected),
+            None,
+        );
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0].name, "read_file");
     }
 
     #[test]

@@ -940,9 +940,9 @@ pub async fn init_agent_rules(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let (scope, path) = if let Some(root) = project_root {
-        ("project", std::path::PathBuf::from(root).join("aura.md"))
+        ("project", std::path::PathBuf::from(root).join("atlas.md"))
     } else {
-        ("global", crate::agent::skills::global_aura_path())
+        ("global", crate::agent::skills::global_atlas_path())
     };
 
     if let Some(parent) = path.parent() {
@@ -958,7 +958,7 @@ pub async fn init_agent_rules(
     if should_write {
         std::fs::write(
             &path,
-            "# Aura 规则\n\n在这里写 Aura 处理任务时需要长期遵守的偏好、项目约定和边界。\n",
+            "# Atlas 规则\n\n在这里写 Atlas 处理任务时需要长期遵守的偏好、项目约定和边界。\n",
         )
         .map_err(|e| e.to_string())?;
     }
@@ -972,7 +972,7 @@ pub async fn init_agent_rules(
 
 #[tauri::command]
 pub async fn read_global_agent_rules() -> Result<GlobalAgentRulesRecord, String> {
-    let path = crate::agent::skills::global_aura_path();
+    let path = crate::agent::skills::global_atlas_path();
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -986,7 +986,7 @@ pub async fn read_global_agent_rules() -> Result<GlobalAgentRulesRecord, String>
 
 #[tauri::command]
 pub async fn save_global_agent_rules(content: String) -> Result<GlobalAgentRulesRecord, String> {
-    let path = crate::agent::skills::global_aura_path();
+    let path = crate::agent::skills::global_atlas_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -1005,13 +1005,13 @@ pub struct CodeReviewCommandRules {
 }
 
 const BUILTIN_CODE_REVIEW_COMMAND_RULES: &str =
-    include_str!("../../../AURA_CODE_REVIEW_COMMAND.md");
+    include_str!("../../../ATLAS_CODE_REVIEW_COMMAND.md");
 
 #[tauri::command]
 pub async fn get_code_review_command_rules(
     project_root: Option<String>,
 ) -> Result<CodeReviewCommandRules, String> {
-    let file_name = "AURA_CODE_REVIEW_COMMAND.md";
+    let file_name = "ATLAS_CODE_REVIEW_COMMAND.md";
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     let mut warnings = Vec::new();
 
@@ -1246,7 +1246,7 @@ pub async fn prepare_file_write(
         .prepare_file_write(
             path,
             content,
-            reason.unwrap_or_else(|| "Aura 准备写入本地文件。".to_string()),
+            reason.unwrap_or_else(|| "Atlas 准备写入本地文件。".to_string()),
         )
         .map_err(|e| e.to_string())
 }
@@ -1685,7 +1685,7 @@ fn default_project_parent() -> Result<PathBuf, String> {
         .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?);
     let documents = home.join("Documents");
     let base = if documents.exists() { documents } else { home };
-    Ok(base.join("Aura Projects"))
+    Ok(base.join("Atlas Projects"))
 }
 
 fn safe_project_folder_name(title: &str) -> String {
@@ -1705,7 +1705,7 @@ fn safe_project_folder_name(title: &str) -> String {
         .trim_matches(|ch| ch == ' ' || ch == '-' || ch == '_')
         .to_string();
     if cleaned.is_empty() {
-        "Aura Project".to_string()
+        "Atlas Project".to_string()
     } else {
         cleaned
     }
@@ -1787,52 +1787,52 @@ fn question_bank() -> Vec<(&'static str, &'static str)> {
     vec![
         (
             "energy",
-            "我希望 Aura 在我需要独处或专注时少打扰，只在必要时提醒。",
+            "我希望 Atlas 在我需要独处或专注时少打扰，只在必要时提醒。",
         ),
         (
             "perception",
-            "我更希望 Aura 先给具体事实、文件路径、数据和可验证依据。",
+            "我更希望 Atlas 先给具体事实、文件路径、数据和可验证依据。",
         ),
         (
             "decision",
-            "做选择时，我更希望 Aura 先分析利弊、风险和执行成本。",
+            "做选择时，我更希望 Atlas 先分析利弊、风险和执行成本。",
         ),
         (
             "execution",
-            "我更喜欢 Aura 帮我把事情整理成明确计划、清单和收尾动作。",
+            "我更喜欢 Atlas 帮我把事情整理成明确计划、清单和收尾动作。",
         ),
         (
             "supportMode",
-            "我状态不好时，希望 Aura 先接住情绪，再问我要不要进入解决方案。",
+            "我状态不好时，希望 Atlas 先接住情绪，再问我要不要进入解决方案。",
         ),
         (
             "proactivity",
-            "我希望 Aura 主动指出可能被我忽略的下一步，但要说明原因。",
+            "我希望 Atlas 主动指出可能被我忽略的下一步，但要说明原因。",
         ),
         ("verbosity", "复杂问题里，我愿意看更长但结构清楚的解释。"),
         (
             "boundary",
-            "我能接受 Aura 温和但明确地指出问题，而不是只顺着我说。",
+            "我能接受 Atlas 温和但明确地指出问题，而不是只顺着我说。",
         ),
         (
             "precision",
-            "不确定时，我希望 Aura 直接说不确定，并给出验证办法。",
+            "不确定时，我希望 Atlas 直接说不确定，并给出验证办法。",
         ),
         (
             "focus",
-            "我希望 Aura 在信息很多时帮我压缩重点，而不是继续扩写。",
+            "我希望 Atlas 在信息很多时帮我压缩重点，而不是继续扩写。",
         ),
         (
             "creativity",
-            "我希望 Aura 在产品、写作或设计问题上给出更有想象力的方案。",
+            "我希望 Atlas 在产品、写作或设计问题上给出更有想象力的方案。",
         ),
         (
             "privacy",
-            "涉及隐私、文件写入、长期记忆或网络请求时，我希望 Aura 总是先确认。",
+            "涉及隐私、文件写入、长期记忆或网络请求时，我希望 Atlas 总是先确认。",
         ),
         (
             "energy",
-            "和 Aura 交流时，我更喜欢低噪声、短回合、能自己安静推进的节奏。",
+            "和 Atlas 交流时，我更喜欢低噪声、短回合、能自己安静推进的节奏。",
         ),
         (
             "perception",
@@ -1840,19 +1840,19 @@ fn question_bank() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "decision",
-            "如果方案会影响别人，我希望 Aura 帮我考虑对方感受和沟通方式。",
+            "如果方案会影响别人，我希望 Atlas 帮我考虑对方感受和沟通方式。",
         ),
         (
             "execution",
-            "计划变化时，我希望 Aura 能快速调整，而不是强行维持原计划。",
+            "计划变化时，我希望 Atlas 能快速调整，而不是强行维持原计划。",
         ),
         (
             "supportMode",
-            "当我只是想说说时，我不希望 Aura 立刻给一串建议。",
+            "当我只是想说说时，我不希望 Atlas 立刻给一串建议。",
         ),
         (
             "proactivity",
-            "长期项目里，我希望 Aura 偶尔帮我回看未完成事项。",
+            "长期项目里，我希望 Atlas 偶尔帮我回看未完成事项。",
         ),
         (
             "verbosity",
@@ -1860,23 +1860,23 @@ fn question_bank() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "boundary",
-            "如果功能没接好，我希望 Aura 明确承认，而不是用漂亮话糊弄。",
+            "如果功能没接好，我希望 Atlas 明确承认，而不是用漂亮话糊弄。",
         ),
         (
             "precision",
-            "涉及代码、配置或测试失败时，我希望 Aura 给出可复现步骤。",
+            "涉及代码、配置或测试失败时，我希望 Atlas 给出可复现步骤。",
         ),
         (
             "focus",
-            "我容易被细节带偏，希望 Aura 帮我拉回当前最重要的问题。",
+            "我容易被细节带偏，希望 Atlas 帮我拉回当前最重要的问题。",
         ),
         (
             "creativity",
-            "我喜欢 Aura 提供一个稳妥方案，再提供一个更大胆的备选。",
+            "我喜欢 Atlas 提供一个稳妥方案，再提供一个更大胆的备选。",
         ),
         (
             "privacy",
-            "我希望 Aura 清楚说明它用了哪些本地信号，没有读取哪些内容。",
+            "我希望 Atlas 清楚说明它用了哪些本地信号，没有读取哪些内容。",
         ),
         ("energy", "我在多人讨论或信息交换后更容易获得新想法。"),
         (
@@ -1890,44 +1890,44 @@ fn question_bank() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "supportMode",
-            "压力很大时，我希望 Aura 先帮我降低噪声，再推进事情。",
+            "压力很大时，我希望 Atlas 先帮我降低噪声，再推进事情。",
         ),
         (
             "proactivity",
-            "当 Aura 发现明显风险时，我希望它主动提醒我，而不是等我问。",
+            "当 Atlas 发现明显风险时，我希望它主动提醒我，而不是等我问。",
         ),
         (
             "verbosity",
-            "我希望 Aura 能根据问题重要程度自动调整回答长度。",
+            "我希望 Atlas 能根据问题重要程度自动调整回答长度。",
         ),
         (
             "boundary",
-            "我不希望 Aura 为了讨好我而假装同意不合理的判断。",
+            "我不希望 Atlas 为了讨好我而假装同意不合理的判断。",
         ),
         (
             "precision",
-            "我希望 Aura 引用外部信息时说明来源、时间和不确定性。",
+            "我希望 Atlas 引用外部信息时说明来源、时间和不确定性。",
         ),
         (
             "focus",
-            "长对话结束后，我希望 Aura 能总结成可以继续执行的摘要。",
+            "长对话结束后，我希望 Atlas 能总结成可以继续执行的摘要。",
         ),
         (
             "creativity",
-            "我希望 Aura 在审美和体验问题上有自己的判断，不只是列选项。",
+            "我希望 Atlas 在审美和体验问题上有自己的判断，不只是列选项。",
         ),
         (
             "privacy",
-            "我希望可以随时查看、暂停和删除 Aura 的画像、记忆和活动记录。",
+            "我希望可以随时查看、暂停和删除 Atlas 的画像、记忆和活动记录。",
         ),
         ("energy", "我在低能量时更需要轻量建议，而不是完整长计划。"),
         (
             "perception",
-            "面对模糊想法时，我希望 Aura 先帮我画出整体结构。",
+            "面对模糊想法时，我希望 Atlas 先帮我画出整体结构。",
         ),
         (
             "decision",
-            "出现冲突时，我希望 Aura 先帮我把事实和情绪分开。",
+            "出现冲突时，我希望 Atlas 先帮我把事实和情绪分开。",
         ),
         (
             "execution",
@@ -1935,24 +1935,24 @@ fn question_bank() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "supportMode",
-            "我希望 Aura 能分辨我是在求安慰、求建议还是求执行。",
+            "我希望 Atlas 能分辨我是在求安慰、求建议还是求执行。",
         ),
         (
             "proactivity",
-            "我希望 Aura 只在有明确理由时主动出现，不要制造存在感。",
+            "我希望 Atlas 只在有明确理由时主动出现，不要制造存在感。",
         ),
         ("verbosity", "我不喜欢重复解释已经明确的上下文。"),
         (
             "boundary",
-            "我希望 Aura 能提醒我哪些能力尚未接入，哪些事情不该做。",
+            "我希望 Atlas 能提醒我哪些能力尚未接入，哪些事情不该做。",
         ),
         (
             "precision",
-            "我对测试结果和失败原因很敏感，希望 Aura 不要只说“已优化”。",
+            "我对测试结果和失败原因很敏感，希望 Atlas 不要只说“已优化”。",
         ),
         (
             "focus",
-            "我希望 Aura 能主动指出当前体验里最影响使用的瓶颈。",
+            "我希望 Atlas 能主动指出当前体验里最影响使用的瓶颈。",
         ),
         (
             "creativity",
@@ -1960,47 +1960,53 @@ fn question_bank() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "privacy",
-            "如果 Aura 要保存一条关于我的长期偏好，我希望先看到建议内容。",
+            "如果 Atlas 要保存一条关于我的长期偏好，我希望先看到建议内容。",
         ),
         ("energy", "我更容易在夜晚进入深度思考或创作状态。"),
         (
             "perception",
             "我更相信能落到文件、任务、记录和结果上的信息。",
         ),
-        ("decision", "我希望 Aura 在给建议时同时考虑效率和人的感受。"),
+        (
+            "decision",
+            "我希望 Atlas 在给建议时同时考虑效率和人的感受。",
+        ),
         (
             "execution",
             "我做事常常需要先探索一段时间，再确定最终计划。",
         ),
         (
             "supportMode",
-            "我卡住时，希望 Aura 给我一个很小但能启动的下一步。",
+            "我卡住时，希望 Atlas 给我一个很小但能启动的下一步。",
         ),
         (
             "proactivity",
-            "我希望 Aura 主动发现无效按钮、假功能和体验断点。",
+            "我希望 Atlas 主动发现无效按钮、假功能和体验断点。",
         ),
         ("verbosity", "重要结论应该短，背景解释可以放在后面。"),
         (
             "boundary",
-            "我希望 Aura 保护我的注意力，不随便扩展无关内容。",
+            "我希望 Atlas 保护我的注意力，不随便扩展无关内容。",
         ),
         (
             "precision",
-            "我希望 Aura 在写代码时优先稳定性、可读性和可验证性。",
+            "我希望 Atlas 在写代码时优先稳定性、可读性和可验证性。",
         ),
         (
             "focus",
-            "我希望 Aura 帮我把想法整理成清晰计划，而不是只陪我发散。",
+            "我希望 Atlas 帮我把想法整理成清晰计划，而不是只陪我发散。",
         ),
-        ("creativity", "我希望 Aura 能帮我把普通表达打磨得更有质感。"),
+        (
+            "creativity",
+            "我希望 Atlas 能帮我把普通表达打磨得更有质感。",
+        ),
         (
             "privacy",
             "我能接受更强的本地能力，但前提是权限、原因和记录都透明。",
         ),
         (
             "energy",
-            "我希望 Aura 记住什么时候适合深聊，什么时候适合简短执行。",
+            "我希望 Atlas 记住什么时候适合深聊，什么时候适合简短执行。",
         ),
         (
             "perception",
@@ -2008,43 +2014,43 @@ fn question_bank() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "decision",
-            "做重要决定前，我希望 Aura 提醒我可能被忽略的人际影响。",
+            "做重要决定前，我希望 Atlas 提醒我可能被忽略的人际影响。",
         ),
         (
             "execution",
-            "我希望 Aura 把计划当作可调整草稿，而不是一旦确定就不变。",
+            "我希望 Atlas 把计划当作可调整草稿，而不是一旦确定就不变。",
         ),
         (
             "supportMode",
-            "我希望 Aura 的关心克制真实，不制造负罪感或依赖感。",
+            "我希望 Atlas 的关心克制真实，不制造负罪感或依赖感。",
         ),
         (
             "proactivity",
-            "我希望 Aura 主动建议下一步，但不能自动执行关键动作。",
+            "我希望 Atlas 主动建议下一步，但不能自动执行关键动作。",
         ),
         (
             "verbosity",
-            "我希望 Aura 能把长内容拆成层次，而不是堆成一大段。",
+            "我希望 Atlas 能把长内容拆成层次，而不是堆成一大段。",
         ),
         (
             "boundary",
-            "当我要求越权读取、写入或推断时，Aura 应该拒绝并解释边界。",
+            "当我要求越权读取、写入或推断时，Atlas 应该拒绝并解释边界。",
         ),
         (
             "precision",
-            "我希望 Aura 区分事实、推测和建议，不把窗口标题当确定事实。",
+            "我希望 Atlas 区分事实、推测和建议，不把窗口标题当确定事实。",
         ),
         (
             "focus",
-            "我希望 Aura 在多任务时帮我确定优先级，而不是把所有事都展开。",
+            "我希望 Atlas 在多任务时帮我确定优先级，而不是把所有事都展开。",
         ),
         (
             "creativity",
-            "我希望 Aura 偶尔提供出乎意料但可落地的设计方向。",
+            "我希望 Atlas 偶尔提供出乎意料但可落地的设计方向。",
         ),
         (
             "privacy",
-            "我希望 Aura 的个性化只服务于我的使用体验，不把我固定成某种标签。",
+            "我希望 Atlas 的个性化只服务于我的使用体验，不把我固定成某种标签。",
         ),
     ]
 }
@@ -2083,7 +2089,7 @@ mod tests {
         let set = personality_questions("quick");
         assert_eq!(set.title, "快速版");
         assert_eq!(set.questions[0].options[0].label, "很不同意");
-        assert!(set.questions[0].text.contains("Aura"));
+        assert!(set.questions[0].text.contains("Atlas"));
     }
 
     #[test]

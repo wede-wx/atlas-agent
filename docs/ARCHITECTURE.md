@@ -14,7 +14,7 @@
 
 ## Commands / Bridge
 
-`src-tauri/src/commands/*` exposes selected backend capabilities to the desktop frontend through Tauri commands. `src/lib/invoke-bridge.ts` is the TypeScript bridge boundary.
+`src-tauri/src/commands/*` exposes selected backend capabilities to a desktop frontend through Tauri commands. The full product UI and TypeScript bridge files are intentionally excluded from this architecture-only preview; command signatures and payload structs in Rust are the source of truth for the bridge boundary.
 
 ## Storage
 

@@ -17,10 +17,10 @@ const BROWSER_AUDIT_KEY: &str = "browser_automation_audit_v1";
 const BROWSER_AUDIT_LIMIT: usize = 200;
 const BROWSER_SCRIPT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../scripts/aura-browser-automation.mjs"
+    "/../scripts/atlas-browser-automation.mjs"
 ));
 const BROWSER_RUNTIME_PACKAGE: &str = r#"{
-  "name": "aura-browser-runtime",
+  "name": "atlas-browser-runtime",
   "private": true,
   "type": "module",
   "dependencies": {
@@ -318,7 +318,7 @@ fn materialize_packaged_browser_script() -> Result<PathBuf, String> {
     }
     let script = runtime_dir
         .join("scripts")
-        .join("aura-browser-automation.mjs");
+        .join("atlas-browser-automation.mjs");
     let current = fs::read_to_string(&script).unwrap_or_default();
     if current != BROWSER_SCRIPT {
         fs::write(&script, BROWSER_SCRIPT)
@@ -330,7 +330,7 @@ fn materialize_packaged_browser_script() -> Result<PathBuf, String> {
 fn browser_runtime_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("Aura")
+        .join("Atlas")
         .join("browser-runtime")
 }
 
@@ -410,7 +410,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        LocalDb::open(std::env::temp_dir().join(format!("aura_browser_{unique}.db"))).unwrap()
+        LocalDb::open(std::env::temp_dir().join(format!("atlas_browser_{unique}.db"))).unwrap()
     }
 
     #[test]
@@ -464,7 +464,7 @@ mod tests {
         assert!(content.contains("async function main"));
         assert!(content.contains("playwright"));
         let package = std::fs::read_to_string(browser_runtime_dir().join("package.json")).unwrap();
-        assert!(package.contains("aura-browser-runtime"));
+        assert!(package.contains("atlas-browser-runtime"));
         assert!(package.contains("playwright"));
     }
 
@@ -479,7 +479,7 @@ mod tests {
                 run_id: None,
                 action: "search".to_string(),
                 target: Some("baidu".to_string()),
-                keyword: Some("Aura 自动化".to_string()),
+                keyword: Some("Atlas 自动化".to_string()),
                 url: None,
                 selector: None,
                 text: None,

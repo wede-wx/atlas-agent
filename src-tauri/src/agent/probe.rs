@@ -305,7 +305,7 @@ async fn probe_openai_compatible_dry_run(input: &ProbeInput) -> CapabilityDryRun
                 "tools": [{
                     "type": "function",
                     "function": {
-                        "name": "aura_probe_tool",
+                        "name": "atlas_probe_tool",
                         "description": "Capability dry-run probe.",
                         "parameters": { "type": "object", "properties": {} }
                     }
@@ -385,7 +385,7 @@ async fn probe_anthropic_dry_run(input: &ProbeInput) -> CapabilityDryRunReport {
                 "messages": [{ "role": "user", "content": "Say ok." }],
                 "max_tokens": 1,
                 "tools": [{
-                    "name": "aura_probe_tool",
+                    "name": "atlas_probe_tool",
                     "description": "Capability dry-run probe.",
                     "input_schema": { "type": "object", "properties": {} }
                 }]
@@ -461,7 +461,7 @@ async fn probe_ollama_dry_run(input: &ProbeInput) -> CapabilityDryRunReport {
                 "tools": [{
                     "type": "function",
                     "function": {
-                        "name": "aura_probe_tool",
+                        "name": "atlas_probe_tool",
                         "description": "Capability dry-run probe.",
                         "parameters": { "type": "object", "properties": {} }
                     }

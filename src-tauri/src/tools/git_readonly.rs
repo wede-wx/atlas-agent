@@ -492,17 +492,21 @@ mod tests {
     async fn run_to_completion_returns_output_for_fast_command() {
         let cmd = if cfg!(windows) {
             let mut c = tokio::process::Command::new("powershell");
-            c.args(["-NoProfile", "-Command", "Write-Output aura-git-timeout-ok"]);
+            c.args([
+                "-NoProfile",
+                "-Command",
+                "Write-Output atlas-git-timeout-ok",
+            ]);
             c
         } else {
             let mut c = tokio::process::Command::new("sh");
-            c.args(["-c", "printf aura-git-timeout-ok"]);
+            c.args(["-c", "printf atlas-git-timeout-ok"]);
             c
         };
         let output = run_to_completion(cmd, Duration::from_secs(10), "test")
             .await
             .unwrap();
         assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("aura-git-timeout-ok"));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("atlas-git-timeout-ok"));
     }
 }

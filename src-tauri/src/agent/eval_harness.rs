@@ -767,7 +767,7 @@ fn write_eval_case_artifact(
     run_id: &str,
     case: &EvalCase,
 ) -> Result<(String, String), String> {
-    let dir = cwd.join("target").join("aura-eval").join(run_id);
+    let dir = cwd.join("target").join("atlas-eval").join(run_id);
     std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     let path = dir.join(format!("{}.json", safe_path_segment(&case.id)));
     let bytes = serde_json::to_vec_pretty(&json!({
@@ -895,7 +895,7 @@ fn tail_text(value: &str, max_chars: usize) -> String {
 
 fn eval_output_path(kind: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "aura_eval_{}_{}_{}.log",
+        "atlas_eval_{}_{}_{}.log",
         std::process::id(),
         Uuid::new_v4(),
         kind
@@ -984,8 +984,10 @@ mod tests {
     }
 
     fn temp_db() -> LocalDb {
-        LocalDb::open(std::env::temp_dir().join(format!("aura_eval_harness_{}.db", Uuid::new_v4())))
-            .unwrap()
+        LocalDb::open(
+            std::env::temp_dir().join(format!("atlas_eval_harness_{}.db", Uuid::new_v4())),
+        )
+        .unwrap()
     }
 
     #[test]

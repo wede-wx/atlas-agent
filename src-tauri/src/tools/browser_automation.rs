@@ -28,7 +28,7 @@ impl Tool for BrowserAutomationTool {
     }
 
     fn description(&self) -> &str {
-        "Run a confirmed browser automation action through Aura's audit boundary."
+        "Run a confirmed browser automation action through Atlas's audit boundary."
     }
 
     fn schema(&self) -> ToolSchema {

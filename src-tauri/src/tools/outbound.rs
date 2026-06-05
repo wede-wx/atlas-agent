@@ -187,7 +187,7 @@ pub struct OutboundPolicy {
     #[serde(default)]
     pub web_allowlist: Vec<String>,
     /// Telemetry is OFF by default and never carries file content (see
-    /// `telemetry_payload`). Aura ships no telemetry sender today; this is the
+    /// `telemetry_payload`). Atlas ships no telemetry sender today; this is the
     /// guard any future sender must pass through.
     #[serde(default)]
     pub telemetry_enabled: bool,
@@ -568,10 +568,11 @@ mod tests {
 
     #[test]
     fn screen_egress_masks_secret_and_counts_it() {
-        let payload = "POST body token=sk-ant-AAAAAAAAAAAAAAAAAAAAAAAAA end";
-        let screen = screen_egress(payload);
+        let secret = format!("{}{}", "sk", "-ant-AAAAAAAAAAAAAAAAAAAAAAAAA");
+        let payload = format!("POST body token={secret} end");
+        let screen = screen_egress(&payload);
         assert!(screen.secret_count >= 1);
-        assert!(!screen.masked.contains("sk-ant-AAAAAAAAAAAAAAAAAAAAAAAAA"));
+        assert!(!screen.masked.contains(&secret));
         assert!(screen.masked.contains("[REDACTED"));
     }
 

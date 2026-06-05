@@ -122,7 +122,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_rejects_existing_directory_outside_allowed_scope() {
         let tool = ListDirectoryTool::default();
-        let temp = std::env::temp_dir().join(format!("aura_list_scope_{}", std::process::id()));
+        let temp = std::env::temp_dir().join(format!("atlas_list_scope_{}", std::process::id()));
         std::fs::create_dir_all(&temp).unwrap();
         let result = tool
             .execute(serde_json::json!({ "path": temp.to_string_lossy() }))

@@ -150,7 +150,7 @@ impl Config {
     }
 
     fn config_path() -> Result<PathBuf, ConfigError> {
-        if let Ok(path) = std::env::var("AURA_HOME") {
+        if let Ok(path) = std::env::var("ATLAS_HOME") {
             let path = path.trim();
             if !path.is_empty() {
                 return Ok(PathBuf::from(path).join("config.toml"));
@@ -158,7 +158,7 @@ impl Config {
         }
         let home = dirs::home_dir()
             .ok_or_else(|| ConfigError::NotFound("Home directory not found".to_string()))?;
-        Ok(home.join(".aura").join("config.toml"))
+        Ok(home.join(".atlas").join("config.toml"))
     }
 
     fn apply_env_overrides(config: &mut Self) {
@@ -742,16 +742,16 @@ mod tests {
     }
 
     #[test]
-    fn aura_home_env_redirects_config_load_and_save() {
+    fn atlas_home_env_redirects_config_load_and_save() {
         let _guard = crate::TEST_ENV_LOCK.blocking_lock();
-        let dir = std::env::temp_dir().join(format!("aura_config_home_{}", uuid::Uuid::new_v4()));
-        std::env::set_var("AURA_HOME", &dir);
+        let dir = std::env::temp_dir().join(format!("atlas_config_home_{}", uuid::Uuid::new_v4()));
+        std::env::set_var("ATLAS_HOME", &dir);
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut config = Config::default();
         if let Some(connection) = config.llm.active_connection_mut() {
-            connection.api_key = "aura-home-secret".to_string();
-            connection.model = "aura-home-model".to_string();
+            connection.api_key = "atlas-home-secret".to_string();
+            connection.model = "atlas-home-model".to_string();
         }
         config.save().unwrap();
 
@@ -759,13 +759,13 @@ mod tests {
         assert!(config_path.exists());
         assert!(std::fs::read_to_string(&config_path)
             .unwrap()
-            .contains("aura-home-secret"));
+            .contains("atlas-home-secret"));
         let loaded = Config::load().unwrap();
         let active = loaded.llm.active_connection().unwrap();
-        assert_eq!(active.api_key, "aura-home-secret");
-        assert_eq!(active.model, "aura-home-model");
+        assert_eq!(active.api_key, "atlas-home-secret");
+        assert_eq!(active.model, "atlas-home-model");
 
-        std::env::remove_var("AURA_HOME");
+        std::env::remove_var("ATLAS_HOME");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -928,7 +928,7 @@ base_url = "https://api.anthropic.com/v1"
                 "spark-openai",
             ),
             (
-                Some("https://example.openai.azure.com/openai/deployments/aura"),
+                Some("https://example.openai.azure.com/openai/deployments/atlas"),
                 "gpt-4o",
                 "azure-openai",
                 "azure-openai",

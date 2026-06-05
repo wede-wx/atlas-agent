@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod atlas_harness;
 pub mod browser_agent;
 pub mod capabilities;
 pub mod code_intelligence;

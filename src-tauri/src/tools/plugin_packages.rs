@@ -397,7 +397,7 @@ impl Tool for InvokePluginCapabilityTool {
     }
 
     fn description(&self) -> &str {
-        "Invoke a capability from an enabled plugin package through Aura's plugin guardrail boundary."
+        "Invoke a capability from an enabled plugin package through Atlas's plugin guardrail boundary."
     }
 
     fn schema(&self) -> ToolSchema {
@@ -502,7 +502,7 @@ pub fn register_installed_plugin_capabilities(registry: &mut ToolRegistry, db: L
     let packages = match db.list_enabled_plugin_packages() {
         Ok(packages) => packages,
         Err(error) => {
-            eprintln!("Aura plugin capability load failed: {error}");
+            eprintln!("Atlas plugin capability load failed: {error}");
             return;
         }
     };
@@ -1296,7 +1296,7 @@ mod tests {
 
     fn temp_db() -> LocalDb {
         let path =
-            std::env::temp_dir().join(format!("aura_plugin_test_{}.db", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atlas_plugin_test_{}.db", uuid::Uuid::new_v4()));
         LocalDb::open(path).unwrap()
     }
 }

@@ -130,11 +130,11 @@ impl CommandIsolationPolicy {
             command.env(&key, value);
             injected.insert(key_text);
         }
-        command.env("AURA_EXECUTION_ISOLATED", "1");
-        injected.insert("AURA_EXECUTION_ISOLATED".to_string());
+        command.env("ATLAS_EXECUTION_ISOLATED", "1");
+        injected.insert("ATLAS_EXECUTION_ISOLATED".to_string());
         if let Some(root) = self.allowed_roots.first() {
-            command.env("AURA_COMMAND_WORKSPACE_ROOT", root);
-            injected.insert("AURA_COMMAND_WORKSPACE_ROOT".to_string());
+            command.env("ATLAS_COMMAND_WORKSPACE_ROOT", root);
+            injected.insert("ATLAS_COMMAND_WORKSPACE_ROOT".to_string());
         }
         (injected.into_iter().collect(), blocked_sensitive)
     }
@@ -337,7 +337,7 @@ mod tests {
         let base = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura-isolation-{}", Uuid::new_v4()));
+            .join(format!("atlas-isolation-{}", Uuid::new_v4()));
         let allowed = base.join("allowed");
         let outside = base.join("outside");
         std::fs::create_dir_all(&allowed).unwrap();
@@ -358,7 +358,7 @@ mod tests {
         let base = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura-isolation-extra-{}", Uuid::new_v4()));
+            .join(format!("atlas-isolation-extra-{}", Uuid::new_v4()));
         let project = base.join("project");
         let extra = base.join("extra");
         std::fs::create_dir_all(&project).unwrap();

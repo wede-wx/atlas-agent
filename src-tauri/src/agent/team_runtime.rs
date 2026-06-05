@@ -517,7 +517,7 @@ mod tests {
     use uuid::Uuid;
 
     fn temp_db() -> LocalDb {
-        LocalDb::open(std::env::temp_dir().join(format!("aura_team_{}.db", Uuid::new_v4())))
+        LocalDb::open(std::env::temp_dir().join(format!("atlas_team_{}.db", Uuid::new_v4())))
             .unwrap()
     }
 

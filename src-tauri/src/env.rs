@@ -22,7 +22,7 @@ struct EnvFile {
 
 fn load_project_env() -> EnvFile {
     #[cfg(test)]
-    if std::env::var("AURA_TEST_DISABLE_PROJECT_ENV")
+    if std::env::var("ATLAS_TEST_DISABLE_PROJECT_ENV")
         .ok()
         .as_deref()
         == Some("1")

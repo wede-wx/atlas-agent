@@ -102,7 +102,7 @@ pub fn create_external_task_mapping(
         &run_id,
         "protocol_task",
         "pending",
-        "external protocol task mapped into Aura run; execution must pass Aura policy and final audit",
+        "external protocol task mapped into Atlas run; execution must pass Atlas policy and final audit",
         json!({
             "protocol": protocol,
             "version": task.version,
@@ -171,7 +171,7 @@ pub fn protocol_compatibility_matrix() -> Vec<ProtocolCompatibilityEntry> {
             streaming: true,
             cancellation: true,
             notes: vec![
-                "External tasks map to Aura runs and cannot call tools directly".to_string(),
+                "External tasks map to Atlas runs and cannot call tools directly".to_string(),
                 "Lifecycle updates are persisted through app_state and run timeline".to_string(),
             ],
         },
@@ -182,7 +182,7 @@ pub fn protocol_compatibility_matrix() -> Vec<ProtocolCompatibilityEntry> {
             lifecycle: true,
             streaming: true,
             cancellation: true,
-            notes: vec!["ACP payloads use the same Aura policy checkpoint".to_string()],
+            notes: vec!["ACP payloads use the same Atlas policy checkpoint".to_string()],
         },
         ProtocolCompatibilityEntry {
             protocol: "a2a".to_string(),
@@ -395,7 +395,7 @@ mod tests {
     use uuid::Uuid;
 
     fn temp_db() -> LocalDb {
-        LocalDb::open(std::env::temp_dir().join(format!("aura_protocol_{}.db", Uuid::new_v4())))
+        LocalDb::open(std::env::temp_dir().join(format!("atlas_protocol_{}.db", Uuid::new_v4())))
             .unwrap()
     }
 

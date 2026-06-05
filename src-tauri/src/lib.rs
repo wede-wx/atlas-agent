@@ -345,12 +345,12 @@ pub fn create_llm_client(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let config = Config::load().expect("Failed to load config");
-    let local_db = LocalDb::open_default().expect("Failed to initialize Aura local database");
+    let local_db = LocalDb::open_default().expect("Failed to initialize Atlas local database");
     local_db
         .mark_interrupted_agent_runs()
-        .expect("Failed to reconcile interrupted Aura agent runs");
+        .expect("Failed to reconcile interrupted Atlas agent runs");
 
-    // Patch 17 / #18: load hook config from ~/.aura/hooks.toml.
+    // Patch 17 / #18: load hook config from ~/.atlas/hooks.toml.
     agent::hooks::reload_global_from_home();
 
     // P0-3: prime the outbound network policy from config so every channel
@@ -402,14 +402,14 @@ pub fn run() {
             setup_global_shortcut(app);
             sync_island_screenshot_shortcuts(&app.handle().clone());
             configure_float_window(&app.handle().clone());
-            if std::env::var("AURA_SMOKE_RUN_ID")
+            if std::env::var("ATLAS_SMOKE_RUN_ID")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .is_some()
             {
                 show_main_window(&app.handle().clone());
             }
-            if std::env::var("AURA_SMOKE_SHOW_FLOAT").ok().as_deref() == Some("1") {
+            if std::env::var("ATLAS_SMOKE_SHOW_FLOAT").ok().as_deref() == Some("1") {
                 if let Some(window) = app.get_webview_window("float") {
                     window.show()?;
                 }
@@ -644,11 +644,11 @@ fn setup_tray(app: &mut tauri::App) {
             tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
         };
 
-        let show_main = match MenuItem::with_id(app, "show-main", "打开 Aura", true, None::<&str>)
+        let show_main = match MenuItem::with_id(app, "show-main", "打开 Atlas", true, None::<&str>)
         {
             Ok(item) => item,
             Err(error) => {
-                eprintln!("Aura tray menu item failed: {error}");
+                eprintln!("Atlas tray menu item failed: {error}");
                 return;
             }
         };
@@ -661,7 +661,7 @@ fn setup_tray(app: &mut tauri::App) {
         ) {
             Ok(item) => item,
             Err(error) => {
-                eprintln!("Aura tray menu item failed: {error}");
+                eprintln!("Atlas tray menu item failed: {error}");
                 return;
             }
         };
@@ -670,7 +670,7 @@ fn setup_tray(app: &mut tauri::App) {
             {
                 Ok(item) => item,
                 Err(error) => {
-                    eprintln!("Aura tray menu item failed: {error}");
+                    eprintln!("Atlas tray menu item failed: {error}");
                     return;
                 }
             };
@@ -679,14 +679,14 @@ fn setup_tray(app: &mut tauri::App) {
             {
                 Ok(item) => item,
                 Err(error) => {
-                    eprintln!("Aura tray menu item failed: {error}");
+                    eprintln!("Atlas tray menu item failed: {error}");
                     return;
                 }
             };
-        let quit = match MenuItem::with_id(app, "quit", "退出 Aura", true, None::<&str>) {
+        let quit = match MenuItem::with_id(app, "quit", "退出 Atlas", true, None::<&str>) {
             Ok(item) => item,
             Err(error) => {
-                eprintln!("Aura tray menu item failed: {error}");
+                eprintln!("Atlas tray menu item failed: {error}");
                 return;
             }
         };
@@ -702,14 +702,14 @@ fn setup_tray(app: &mut tauri::App) {
         ) {
             Ok(menu) => menu,
             Err(error) => {
-                eprintln!("Aura tray menu failed: {error}");
+                eprintln!("Atlas tray menu failed: {error}");
                 return;
             }
         };
 
         let mut builder = TrayIconBuilder::new()
             .menu(&menu)
-            .tooltip("Aura")
+            .tooltip("Atlas")
             .show_menu_on_left_click(true)
             .on_menu_event(|app, event| match event.id.as_ref() {
                 "show-main" => show_main_window(app),
@@ -734,7 +734,7 @@ fn setup_tray(app: &mut tauri::App) {
             builder = builder.icon(icon.clone());
         }
         if let Err(error) = builder.build(app) {
-            eprintln!("Aura tray setup failed: {error}");
+            eprintln!("Atlas tray setup failed: {error}");
         }
     }
 
@@ -749,20 +749,20 @@ fn setup_global_shortcut(app: &mut tauri::App) {
     {
         use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
-        if std::env::var("AURA_SMOKE_SKIP_GLOBAL_SHORTCUT")
+        if std::env::var("ATLAS_SMOKE_SKIP_GLOBAL_SHORTCUT")
             .ok()
             .as_deref()
             == Some("1")
         {
-            eprintln!("Aura global shortcut registration skipped by smoke env");
+            eprintln!("Atlas global shortcut registration skipped by smoke env");
             return;
         }
 
         let toggle_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space);
         if let Err(error) = app.global_shortcut().register(toggle_shortcut) {
-            eprintln!("Aura global shortcut registration failed: {error}");
+            eprintln!("Atlas global shortcut registration failed: {error}");
         } else {
-            eprintln!("Aura global shortcut registered: Ctrl+Alt+Space");
+            eprintln!("Atlas global shortcut registered: Ctrl+Alt+Space");
         }
     }
 
@@ -806,7 +806,7 @@ fn configured_island_screenshot_shortcuts(
 fn apply_smoke_screenshot_shortcut_overrides(
     shortcuts: &mut [(IslandScreenshotShortcutAction, &'static str, String)],
 ) {
-    if std::env::var("AURA_SMOKE_RUN_ID")
+    if std::env::var("ATLAS_SMOKE_RUN_ID")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .is_none()
@@ -816,9 +816,9 @@ fn apply_smoke_screenshot_shortcut_overrides(
 
     for (action, _, accelerator) in shortcuts.iter_mut() {
         let env_name = match action {
-            IslandScreenshotShortcutAction::Screenshot => "AURA_SMOKE_SCREENSHOT_MAIN_SHORTCUT",
-            IslandScreenshotShortcutAction::Pin => "AURA_SMOKE_SCREENSHOT_PIN_SHORTCUT",
-            IslandScreenshotShortcutAction::Delay => "AURA_SMOKE_SCREENSHOT_DELAY_SHORTCUT",
+            IslandScreenshotShortcutAction::Screenshot => "ATLAS_SMOKE_SCREENSHOT_MAIN_SHORTCUT",
+            IslandScreenshotShortcutAction::Pin => "ATLAS_SMOKE_SCREENSHOT_PIN_SHORTCUT",
+            IslandScreenshotShortcutAction::Delay => "ATLAS_SMOKE_SCREENSHOT_DELAY_SHORTCUT",
         };
         if let Ok(value) = std::env::var(env_name) {
             let value = value.trim();
@@ -835,12 +835,12 @@ pub(crate) fn sync_island_screenshot_shortcuts<R: Runtime>(app: &tauri::AppHandl
     use std::str::FromStr;
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
-    if std::env::var("AURA_SMOKE_SKIP_GLOBAL_SHORTCUT")
+    if std::env::var("ATLAS_SMOKE_SKIP_GLOBAL_SHORTCUT")
         .ok()
         .as_deref()
         == Some("1")
     {
-        eprintln!("Aura screenshot shortcut registration skipped by smoke env");
+        eprintln!("Atlas screenshot shortcut registration skipped by smoke env");
         return;
     }
 
@@ -848,7 +848,7 @@ pub(crate) fn sync_island_screenshot_shortcuts<R: Runtime>(app: &tauri::AppHandl
     let mut registry = match island_screenshot_shortcuts().lock() {
         Ok(registry) => registry,
         Err(_) => {
-            eprintln!("Aura screenshot shortcut registry unavailable");
+            eprintln!("Atlas screenshot shortcut registry unavailable");
             return;
         }
     };
@@ -856,7 +856,7 @@ pub(crate) fn sync_island_screenshot_shortcuts<R: Runtime>(app: &tauri::AppHandl
     for registered in registry.drain(..) {
         if let Err(error) = shortcut_manager.unregister(registered.shortcut) {
             eprintln!(
-                "Aura screenshot shortcut unregister failed ({}): {error}",
+                "Atlas screenshot shortcut unregister failed ({}): {error}",
                 registered.action.as_str()
             );
         }
@@ -866,7 +866,7 @@ pub(crate) fn sync_island_screenshot_shortcuts<R: Runtime>(app: &tauri::AppHandl
     let settings = match commands::load_island_settings_from_db(&state.local_db) {
         Ok(settings) => settings,
         Err(error) => {
-            eprintln!("Aura screenshot shortcut settings load failed: {error}");
+            eprintln!("Atlas screenshot shortcut settings load failed: {error}");
             return;
         }
     };
@@ -874,13 +874,13 @@ pub(crate) fn sync_island_screenshot_shortcuts<R: Runtime>(app: &tauri::AppHandl
     for (action, label, accelerator) in configured_island_screenshot_shortcuts(&settings) {
         let accelerator = accelerator.trim().to_string();
         if accelerator.is_empty() {
-            eprintln!("Aura screenshot shortcut skipped ({label}): empty accelerator");
+            eprintln!("Atlas screenshot shortcut skipped ({label}): empty accelerator");
             continue;
         }
         let dedupe_key = accelerator.to_ascii_lowercase().replace(' ', "");
         if !seen.insert(dedupe_key) {
             eprintln!(
-                "Aura screenshot shortcut skipped ({label}): duplicate accelerator {accelerator}"
+                "Atlas screenshot shortcut skipped ({label}): duplicate accelerator {accelerator}"
             );
             continue;
         }
@@ -888,25 +888,25 @@ pub(crate) fn sync_island_screenshot_shortcuts<R: Runtime>(app: &tauri::AppHandl
             Ok(shortcut) => shortcut,
             Err(error) => {
                 eprintln!(
-                    "Aura screenshot shortcut skipped ({label} {accelerator}): invalid accelerator: {error}"
+                    "Atlas screenshot shortcut skipped ({label} {accelerator}): invalid accelerator: {error}"
                 );
                 continue;
             }
         };
         if shortcut_manager.is_registered(shortcut) {
             eprintln!(
-                "Aura screenshot shortcut skipped ({label} {accelerator}): already registered by Aura"
+                "Atlas screenshot shortcut skipped ({label} {accelerator}): already registered by Atlas"
             );
             continue;
         }
         match shortcut_manager.register(shortcut) {
             Ok(_) => {
                 registry.push(RegisteredIslandScreenshotShortcut { action, shortcut });
-                eprintln!("Aura screenshot shortcut registered: {label} {accelerator}");
+                eprintln!("Atlas screenshot shortcut registered: {label} {accelerator}");
             }
             Err(error) => {
                 eprintln!(
-                    "Aura screenshot shortcut registration failed ({label} {accelerator}): {error}"
+                    "Atlas screenshot shortcut registration failed ({label} {accelerator}): {error}"
                 );
             }
         }
@@ -973,7 +973,7 @@ fn trigger_island_screenshot_shortcut<R: Runtime>(
     if let Some(window) = app.get_webview_window("float") {
         let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
         let script = format!(
-            "window.dispatchEvent(new CustomEvent('aura:island-shortcut', {{ detail: {} }}));",
+            "window.dispatchEvent(new CustomEvent('atlas:island-shortcut', {{ detail: {} }}));",
             payload_json
         );
         dispatch_method = "webview_eval";
@@ -983,7 +983,7 @@ fn trigger_island_screenshot_shortcut<R: Runtime>(
         }
     }
     if !dispatch_ok {
-        let emit_result = app.emit_to("float", "aura-island-shortcut", payload);
+        let emit_result = app.emit_to("float", "atlas-island-shortcut", payload);
         dispatch_method = "emit_to";
         dispatch_ok = emit_result.is_ok();
         if let Err(error) = emit_result {
@@ -1001,13 +1001,13 @@ fn trigger_island_screenshot_shortcut<R: Runtime>(
     );
     if let Some(error) = dispatch_error {
         eprintln!(
-            "Aura screenshot shortcut event dispatch failed ({} via {}): {error}",
+            "Atlas screenshot shortcut event dispatch failed ({} via {}): {error}",
             action.as_str(),
             dispatch_method
         );
     } else {
         eprintln!(
-            "Aura screenshot shortcut event dispatched ({} via {})",
+            "Atlas screenshot shortcut event dispatched ({} via {})",
             action.as_str(),
             dispatch_method
         );
@@ -1024,11 +1024,11 @@ fn write_island_shortcut_smoke_proof(
     dispatch_method: &str,
     error: Option<String>,
 ) {
-    if std::env::var("AURA_SMOKE_ENABLE_ISLAND_SHORTCUT_PROOF")
+    if std::env::var("ATLAS_SMOKE_ENABLE_ISLAND_SHORTCUT_PROOF")
         .ok()
         .as_deref()
         != Some("1")
-        && std::env::var("AURA_SMOKE_ENABLE_ISLAND_CAPABILITIES")
+        && std::env::var("ATLAS_SMOKE_ENABLE_ISLAND_CAPABILITIES")
             .ok()
             .as_deref()
             != Some("1")
@@ -1036,7 +1036,7 @@ fn write_island_shortcut_smoke_proof(
         return;
     }
 
-    let smoke_run_id = std::env::var("AURA_SMOKE_RUN_ID").unwrap_or_default();
+    let smoke_run_id = std::env::var("ATLAS_SMOKE_RUN_ID").unwrap_or_default();
     if smoke_run_id.trim().is_empty() {
         return;
     }
@@ -1059,7 +1059,7 @@ fn write_island_shortcut_smoke_proof(
         "capturedAt": captured_at,
     });
     let path = std::env::temp_dir().join(format!(
-        "aura-island-shortcut-smoke-{}-{}.json",
+        "atlas-island-shortcut-smoke-{}-{}.json",
         proof
             .get("smokeRunId")
             .and_then(serde_json::Value::as_str)
@@ -1074,7 +1074,7 @@ fn write_island_shortcut_smoke_proof(
 
 fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_title("Aura");
+        let _ = window.set_title("Atlas");
         let _ = window.set_min_size(Some(LogicalSize::new(1100.0, 700.0)));
         let _ = window.set_size(LogicalSize::new(1360.0, 860.0));
         let _ = window.center();
@@ -1356,7 +1356,7 @@ fn set_island_manual_hidden_from_app<R: Runtime>(app: &tauri::AppHandle<R>, manu
         Ok(settings) => {
             let _ = app.emit("island-settings-changed", settings);
         }
-        Err(error) => eprintln!("Aura island manual hidden update failed: {error}"),
+        Err(error) => eprintln!("Atlas island manual hidden update failed: {error}"),
     }
 }
 
@@ -1366,7 +1366,7 @@ fn set_island_privacy_from_app<R: Runtime>(app: &tauri::AppHandle<R>, privacy_pa
         Ok(settings) => {
             let _ = app.emit("island-settings-changed", settings);
         }
-        Err(error) => eprintln!("Aura island privacy update failed: {error}"),
+        Err(error) => eprintln!("Atlas island privacy update failed: {error}"),
     }
 }
 
@@ -1414,7 +1414,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        LocalDb::open(std::env::temp_dir().join(format!("aura_tool_registry_{unique}.db"))).unwrap()
+        LocalDb::open(std::env::temp_dir().join(format!("atlas_tool_registry_{unique}.db")))
+            .unwrap()
     }
 
     #[test]

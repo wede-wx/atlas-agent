@@ -90,7 +90,7 @@ mod tests {
         let base = std::env::current_dir().unwrap().join("target");
         std::fs::create_dir_all(&base).unwrap();
         let target = base
-            .join(format!("aura_create_dir_{}", Uuid::new_v4()))
+            .join(format!("atlas_create_dir_{}", Uuid::new_v4()))
             .join("nested")
             .join("page");
         let tool = CreateDirectoryTool::default();

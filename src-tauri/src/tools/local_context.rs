@@ -21,7 +21,7 @@ impl Tool for AddMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Save one explicit long-term memory to Aura local SQLite."
+        "Save one explicit long-term memory to Atlas local SQLite."
     }
 
     fn schema(&self) -> ToolSchema {

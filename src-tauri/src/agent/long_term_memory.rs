@@ -365,7 +365,7 @@ mod tests {
     use uuid::Uuid;
 
     fn temp_db() -> LocalDb {
-        LocalDb::open(std::env::temp_dir().join(format!("aura_knowledge_{}.db", Uuid::new_v4())))
+        LocalDb::open(std::env::temp_dir().join(format!("atlas_knowledge_{}.db", Uuid::new_v4())))
             .unwrap()
     }
 
@@ -374,9 +374,9 @@ mod tests {
         let db = temp_db();
         add_project_knowledge(
             &db,
-            "project:aura",
+            "project:atlas",
             "Build command",
-            "Aura backend verification uses cargo test --lib and cargo clippy.",
+            "Atlas backend verification uses cargo test --lib and cargo clippy.",
             "shixiang.md",
             "project",
         )
@@ -385,7 +385,7 @@ mod tests {
             &db,
             KnowledgeRecallRequest {
                 query: "cargo clippy backend".to_string(),
-                scope: Some("project:aura".to_string()),
+                scope: Some("project:atlas".to_string()),
                 limit: Some(3),
             },
         )
@@ -442,7 +442,7 @@ mod tests {
         let db = temp_db();
         let relevant = add_project_knowledge(
             &db,
-            "project:aura",
+            "project:atlas",
             "Verifier command",
             "Use cargo test --lib eval_harness for verifier architecture.",
             "manual",
@@ -451,7 +451,7 @@ mod tests {
         .unwrap();
         let irrelevant = add_project_knowledge(
             &db,
-            "project:aura",
+            "project:atlas",
             "Unrelated note",
             "This note talks about colors and spacing only.",
             "manual",
@@ -463,7 +463,7 @@ mod tests {
             &db,
             KnowledgeRecallRequest {
                 query: "cargo verifier".to_string(),
-                scope: Some("project:aura".to_string()),
+                scope: Some("project:atlas".to_string()),
                 limit: Some(5),
             },
         )
@@ -475,7 +475,7 @@ mod tests {
             &db,
             KnowledgeRecallRequest {
                 query: "colors spacing".to_string(),
-                scope: Some("project:aura".to_string()),
+                scope: Some("project:atlas".to_string()),
                 limit: Some(5),
             },
         )
@@ -492,7 +492,7 @@ mod tests {
             KnowledgeConnectorIngestRequest {
                 connector_id: "docs".to_string(),
                 items: vec![KnowledgeConnectorItem {
-                    scope: "project:aura".to_string(),
+                    scope: "project:atlas".to_string(),
                     source: "handoff.md".to_string(),
                     trust: "untrusted".to_string(),
                     title: "External claim".to_string(),
@@ -509,7 +509,7 @@ mod tests {
             &db,
             KnowledgeRecallRequest {
                 query: "cargo verifier".to_string(),
-                scope: Some("project:aura".to_string()),
+                scope: Some("project:atlas".to_string()),
                 limit: Some(5),
             },
         )
@@ -527,7 +527,7 @@ mod tests {
         let record = write_memory_from_event(
             &db,
             MemoryWriteEvent {
-                scope: "project:aura".to_string(),
+                scope: "project:atlas".to_string(),
                 event_type: "failure".to_string(),
                 title: "Tool timeout".to_string(),
                 text: "The setup command timed out during npm install.".to_string(),

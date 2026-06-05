@@ -4,8 +4,8 @@
 //!
 //! Resolution order for the command (mirrors `agent::verification::load_verify_config`):
 //! 1. explicit `command` argument
-//! 2. `kind` argument resolved via task `verify_json`, then project `.aura/verify.toml`,
-//!    then `~/.aura/verify.toml`, then builtin defaults.
+//! 2. `kind` argument resolved via task `verify_json`, then project `.atlas/verify.toml`,
+//!    then `~/.atlas/verify.toml`, then builtin defaults.
 //! 3. error if neither resolves.
 
 use async_trait::async_trait;
@@ -17,7 +17,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::agent::verification::{load_verify_config, stderr_signature, user_aura_home};
+use crate::agent::verification::{load_verify_config, stderr_signature, user_atlas_home};
 use crate::agent::{AgentError, ToolResult, ToolSchema};
 use crate::storage::LocalDb;
 use crate::tools::{Tool, ToolCapability, ToolMetadata, ToolSafetyLevel};
@@ -145,7 +145,7 @@ impl Tool for RunVerifyTool {
             (None, Some(k)) if !k.is_empty() => {
                 let cfg = load_verify_config(
                     self.project_root.as_deref(),
-                    user_aura_home().as_deref(),
+                    user_atlas_home().as_deref(),
                     Some(&task.verify),
                 );
                 cfg.commands.get(&k).cloned().ok_or_else(|| {
@@ -713,7 +713,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        LocalDb::open(std::env::temp_dir().join(format!("aura_runverify_{unique}.db"))).unwrap()
+        LocalDb::open(std::env::temp_dir().join(format!("atlas_runverify_{unique}.db"))).unwrap()
     }
 
     #[tokio::test]

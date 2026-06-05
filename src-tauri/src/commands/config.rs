@@ -88,71 +88,71 @@ pub struct SettingsSmokeProofPayload {
 }
 
 fn settings_persistence_smoke_enabled() -> bool {
-    if std::env::var("AURA_SMOKE_EXERCISE_SETTINGS_PERSISTENCE")
+    if std::env::var("ATLAS_SMOKE_EXERCISE_SETTINGS_PERSISTENCE")
         .ok()
         .as_deref()
         != Some("1")
     {
         return false;
     }
-    let Some(aura_home) = std::env::var("AURA_HOME")
+    let Some(atlas_home) = std::env::var("ATLAS_HOME")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
     else {
         return false;
     };
-    aura_home.to_ascii_lowercase().contains("tauri-smoke")
+    atlas_home.to_ascii_lowercase().contains("tauri-smoke")
 }
 
 fn settings_domain_smoke_enabled() -> bool {
-    if std::env::var("AURA_SMOKE_EXERCISE_SETTINGS_19_31")
+    if std::env::var("ATLAS_SMOKE_EXERCISE_SETTINGS_19_31")
         .ok()
         .as_deref()
         != Some("1")
     {
         return false;
     }
-    let Some(aura_home) = std::env::var("AURA_HOME")
+    let Some(atlas_home) = std::env::var("ATLAS_HOME")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
     else {
         return false;
     };
-    aura_home.to_ascii_lowercase().contains("tauri-smoke")
+    atlas_home.to_ascii_lowercase().contains("tauri-smoke")
 }
 
 fn agent_workbench_smoke_enabled() -> bool {
-    if std::env::var("AURA_SMOKE_EXERCISE_AGENT_WORKBENCH")
+    if std::env::var("ATLAS_SMOKE_EXERCISE_AGENT_WORKBENCH")
         .ok()
         .as_deref()
         != Some("1")
     {
         return false;
     }
-    let Some(aura_home) = std::env::var("AURA_HOME")
+    let Some(atlas_home) = std::env::var("ATLAS_HOME")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
     else {
         return false;
     };
-    aura_home.to_ascii_lowercase().contains("tauri-smoke")
+    atlas_home.to_ascii_lowercase().contains("tauri-smoke")
 }
 
 fn agent_cancel_smoke_base_url() -> Option<String> {
     if !agent_workbench_smoke_enabled() {
         return None;
     }
-    if std::env::var("AURA_SMOKE_EXERCISE_AGENT_CANCEL")
+    if std::env::var("ATLAS_SMOKE_EXERCISE_AGENT_CANCEL")
         .ok()
         .as_deref()
         != Some("1")
     {
         return None;
     }
-    std::env::var("AURA_SMOKE_CANCELLABLE_LLM_BASE_URL")
+    std::env::var("ATLAS_SMOKE_CANCELLABLE_LLM_BASE_URL")
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| {
@@ -216,8 +216,8 @@ pub async fn write_settings_smoke_proof(
     window: Window,
     payload: SettingsSmokeProofPayload,
 ) -> Result<Value, String> {
-    let smoke_run_id = std::env::var("AURA_SMOKE_RUN_ID").unwrap_or_default();
-    if std::env::var("AURA_SMOKE_ENABLE_SETTINGS_PROOF")
+    let smoke_run_id = std::env::var("ATLAS_SMOKE_RUN_ID").unwrap_or_default();
+    if std::env::var("ATLAS_SMOKE_ENABLE_SETTINGS_PROOF")
         .ok()
         .as_deref()
         != Some("1")
@@ -241,7 +241,7 @@ pub async fn write_settings_smoke_proof(
         "exerciseSettings19To31": settings_domain_smoke_enabled(),
     });
     let path = std::env::temp_dir().join(format!(
-        "aura-settings-open-smoke-{}-{}.json",
+        "atlas-settings-open-smoke-{}-{}.json",
         proof
             .get("smokeRunId")
             .and_then(Value::as_str)
@@ -263,8 +263,8 @@ pub async fn write_settings_persistence_smoke_proof(
     window: Window,
     payload: Value,
 ) -> Result<Value, String> {
-    let smoke_run_id = std::env::var("AURA_SMOKE_RUN_ID").unwrap_or_default();
-    if std::env::var("AURA_SMOKE_ENABLE_SETTINGS_PROOF")
+    let smoke_run_id = std::env::var("ATLAS_SMOKE_RUN_ID").unwrap_or_default();
+    if std::env::var("ATLAS_SMOKE_ENABLE_SETTINGS_PROOF")
         .ok()
         .as_deref()
         != Some("1")
@@ -293,13 +293,13 @@ pub async fn write_settings_persistence_smoke_proof(
         Value::String(window.label().to_string()),
     );
     proof.insert(
-        "auraHomeIsolated".to_string(),
+        "atlasHomeIsolated".to_string(),
         Value::Bool(settings_persistence_smoke_enabled()),
     );
 
     let proof = Value::Object(proof);
     let path = std::env::temp_dir().join(format!(
-        "aura-settings-persistence-smoke-{}-{}.json",
+        "atlas-settings-persistence-smoke-{}-{}.json",
         proof
             .get("smokeRunId")
             .and_then(Value::as_str)
@@ -316,8 +316,8 @@ pub async fn write_settings_domain_smoke_proof(
     window: Window,
     payload: Value,
 ) -> Result<Value, String> {
-    let smoke_run_id = std::env::var("AURA_SMOKE_RUN_ID").unwrap_or_default();
-    if std::env::var("AURA_SMOKE_ENABLE_SETTINGS_PROOF")
+    let smoke_run_id = std::env::var("ATLAS_SMOKE_RUN_ID").unwrap_or_default();
+    if std::env::var("ATLAS_SMOKE_ENABLE_SETTINGS_PROOF")
         .ok()
         .as_deref()
         != Some("1")
@@ -346,13 +346,13 @@ pub async fn write_settings_domain_smoke_proof(
         Value::String(window.label().to_string()),
     );
     proof.insert(
-        "auraHomeIsolated".to_string(),
+        "atlasHomeIsolated".to_string(),
         Value::Bool(settings_domain_smoke_enabled()),
     );
 
     let proof = Value::Object(proof);
     let path = std::env::temp_dir().join(format!(
-        "aura-settings-domain-smoke-{}-{}.json",
+        "atlas-settings-domain-smoke-{}-{}.json",
         proof
             .get("smokeRunId")
             .and_then(Value::as_str)
@@ -369,7 +369,7 @@ pub async fn write_agent_workbench_smoke_proof(
     window: Window,
     payload: Value,
 ) -> Result<Value, String> {
-    let smoke_run_id = std::env::var("AURA_SMOKE_RUN_ID").unwrap_or_default();
+    let smoke_run_id = std::env::var("ATLAS_SMOKE_RUN_ID").unwrap_or_default();
     if smoke_run_id.trim().is_empty() || !agent_workbench_smoke_enabled() {
         return Ok(json!({ "ok": false, "enabled": false }));
     }
@@ -393,7 +393,7 @@ pub async fn write_agent_workbench_smoke_proof(
         Value::String(window.label().to_string()),
     );
     proof.insert(
-        "auraHomeIsolated".to_string(),
+        "atlasHomeIsolated".to_string(),
         Value::Bool(agent_workbench_smoke_enabled()),
     );
     if let Some(phase) = proof.get_mut("phase") {
@@ -404,7 +404,7 @@ pub async fn write_agent_workbench_smoke_proof(
 
     let proof = Value::Object(proof);
     let path = std::env::temp_dir().join(format!(
-        "aura-agent-workbench-smoke-{}-{}.json",
+        "atlas-agent-workbench-smoke-{}-{}.json",
         proof
             .get("smokeRunId")
             .and_then(Value::as_str)

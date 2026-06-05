@@ -409,7 +409,7 @@ mod tests {
 
     fn temp_db() -> LocalDb {
         LocalDb::open(
-            std::env::temp_dir().join(format!("aura_provider_economics_{}.db", Uuid::new_v4())),
+            std::env::temp_dir().join(format!("atlas_provider_economics_{}.db", Uuid::new_v4())),
         )
         .unwrap()
     }

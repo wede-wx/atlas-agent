@@ -1,0 +1,175 @@
+{
+  "id": "benchmark_core",
+  "name": "Core Agent Benchmark",
+  "kind": "benchmark",
+  "description": "Architecture-level real-task benchmark for coding, planning, verification, auditability, and provider behavior.",
+  "exitGate": {
+    "minCases": 10,
+    "minPassRate": 0.85,
+    "maxFalseCompletionRate": 0.0,
+    "requireAllCritical": true,
+    "requiredTags": ["real_verification", "audit", "checkpoint", "provider"]
+  },
+  "cases": [
+    {
+      "id": "bench-repo-orient",
+      "title": "Orient in an unfamiliar repo before editing",
+      "category": "context",
+      "tags": ["critical", "real_verification"],
+      "prompt": "Find the source of truth for agent run timeline data and explain which files own storage, commands, and frontend bridge contracts before making changes.",
+      "setup": ["Use a clean working tree with existing agent timeline tests."],
+      "allowedProviders": ["openai", "anthropic", "ollama", "lmstudio"],
+      "expected": ["Identifies storage/mod.rs as run timeline storage source", "Identifies command and TS bridge entry points", "Does not edit before source-of-truth discovery"],
+      "forbidden": ["Guessing from file names only"],
+      "verifier": {
+        "commands": [{"command": "git diff --check", "timeoutMs": 120000}],
+        "evidence": ["Agent final report cites concrete source files and validation commands."],
+        "successCriteria": ["No source-of-truth step is skipped."]
+      }
+    },
+    {
+      "id": "bench-targeted-fix",
+      "title": "Make a narrow backend fix with tests",
+      "category": "coding",
+      "tags": ["critical", "real_verification"],
+      "prompt": "Fix a failing backend function without unrelated refactors and add the smallest regression test that proves the failure path.",
+      "setup": ["Introduce a known failing unit test in an isolated module."],
+      "allowedProviders": ["openai", "anthropic", "ollama", "lmstudio"],
+      "expected": ["Patch is scoped to the failing behavior", "Regression test fails before and passes after", "No unrelated file churn"],
+      "forbidden": ["Deleting the test", "Broad formatting churn"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Changed files list and test output are captured."],
+        "successCriteria": ["The failing path is explicitly covered."]
+      }
+    },
+    {
+      "id": "bench-tool-audit",
+      "title": "Persist tool audit and permission decisions",
+      "category": "audit",
+      "tags": ["critical", "audit", "real_verification"],
+      "prompt": "Run a task that calls a guarded command and prove the tool audit and permission-decision timeline contain the real policy, reason, and decision.",
+      "setup": ["Use default permission mode and a command classified as sensitive."],
+      "allowedProviders": ["openai", "anthropic"],
+      "expected": ["tool_audit row exists", "permission_decision row exists", "timeline includes both records"],
+      "forbidden": ["Only showing an in-memory event"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib permission_decision", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Timeline payload contains reason and decidedBy fields."],
+        "successCriteria": ["Audit survives storage round-trip."]
+      }
+    },
+    {
+      "id": "bench-checkpoint-diff",
+      "title": "Build run diff from checkpoints",
+      "category": "checkpoint",
+      "tags": ["critical", "checkpoint", "real_verification"],
+      "prompt": "Create, modify, and delete files during one run, then show the run diff from checkpoints without reading current disk state.",
+      "setup": ["Use a temporary project folder with three text files."],
+      "allowedProviders": ["openai", "anthropic", "ollama", "lmstudio"],
+      "expected": ["Diff lists created, modified, and deleted paths", "Diff records before and after hashes", "Current unrelated disk edits do not change old diff"],
+      "forbidden": ["Using git diff against current worktree as the only source"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib run_diff", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Checkpoint IDs are present in diff rows."],
+        "successCriteria": ["Diff is reproducible after later file edits."]
+      }
+    },
+    {
+      "id": "bench-final-audit",
+      "title": "Final audit refuses unverified completion",
+      "category": "completion",
+      "tags": ["critical", "real_verification"],
+      "prompt": "Complete a plan with code changes but no real verification and confirm the final delivery status is unverified, not complete.",
+      "setup": ["Use a task plan with at least one verification-required task."],
+      "allowedProviders": ["openai", "anthropic", "ollama", "lmstudio"],
+      "expected": ["Final audit status is unverified or partial", "Report lists missing verification", "No final message claims complete"],
+      "forbidden": ["Treating code edits as completion"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib final_audit", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Delivery report contains unverified items."],
+        "successCriteria": ["False completion is blocked."]
+      }
+    },
+    {
+      "id": "bench-plan-change",
+      "title": "Record plan task change reasons",
+      "category": "planning",
+      "tags": ["audit", "real_verification"],
+      "prompt": "Create, activate, update, waive, and archive plan tasks while recording change reasons and before/after payloads.",
+      "setup": ["Use one session and one agent run."],
+      "allowedProviders": ["openai", "anthropic"],
+      "expected": ["plan_change_events include each substantive mutation", "Reasons are non-empty", "Duplicate no-op active switch is not logged"],
+      "forbidden": ["Current-only plan state without audit log"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib plan_change", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Timeline contains plan_change entries."],
+        "successCriteria": ["The plan audit is replayable."]
+      }
+    },
+    {
+      "id": "bench-terminal-feed",
+      "title": "Expose real terminal command stream",
+      "category": "observability",
+      "tags": ["real_verification"],
+      "prompt": "Show a run-scoped terminal feed derived from real command or verification payloads and omit tool records that do not contain command text.",
+      "setup": ["Seed a run with an approval pendingCommand and a tool audit row without command payload."],
+      "allowedProviders": ["openai", "anthropic", "ollama", "lmstudio"],
+      "expected": ["Terminal feed includes the pending command", "Tool audit without command is omitted", "stdout/stderr tails are preserved when present"],
+      "forbidden": ["Fabricating command text from tool names"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib terminal_feed", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Terminal entry sourceId points to original row."],
+        "successCriteria": ["No fake terminal rows are produced."]
+      }
+    },
+    {
+      "id": "bench-token-budget",
+      "title": "Account estimated usage when provider usage is absent",
+      "category": "budget",
+      "tags": ["real_verification"],
+      "prompt": "Run a model path with no provider usage payload and prove estimated usage is logged as estimated rather than zero or real API usage.",
+      "setup": ["Use a no-usage mock client or local provider path."],
+      "allowedProviders": ["ollama", "lmstudio", "openai"],
+      "expected": ["model_usage_events source is estimated", "Budget counters move", "Report discloses estimate quality"],
+      "forbidden": ["Pretending estimated tokens are provider-reported usage"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib token_budget", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Usage source distinguishes estimated from API usage."],
+        "successCriteria": ["No-usage providers still affect budget policy."]
+      }
+    },
+    {
+      "id": "bench-provider-fallback",
+      "title": "Provider fallback preserves capability requirements",
+      "category": "provider",
+      "tags": ["critical", "provider", "real_verification"],
+      "prompt": "Route a task requiring tool calls and JSON mode across fallback providers without choosing a provider that lacks the required capability.",
+      "setup": ["Seed provider capability rows with one capable and one incapable provider."],
+      "allowedProviders": ["openai", "anthropic", "ollama", "lmstudio"],
+      "expected": ["Routing decision explains required capabilities", "Incapable provider is skipped", "Fallback audit records the decision"],
+      "forbidden": ["Retrying blindly on incompatible providers"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib model_routing", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Capability audit contains source and reason."],
+        "successCriteria": ["Provider choice is capability-aware."]
+      }
+    },
+    {
+      "id": "bench-retry-resume",
+      "title": "Retry failed run without losing history",
+      "category": "runtime",
+      "tags": ["audit", "real_verification"],
+      "prompt": "Fail a run during a tool step, retry it, and prove the original run remains auditable while the retry has its own run id and timeline.",
+      "setup": ["Use a deterministic tool failure in an agent run."],
+      "allowedProviders": ["openai", "anthropic"],
+      "expected": ["Original run status remains failed", "Retry run references prior context", "Timelines do not cross-contaminate"],
+      "forbidden": ["Overwriting the failed run history"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib retry_agent_run", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Two run IDs are visible in audit output."],
+        "successCriteria": ["Retry is reconstructable from storage."]
+      }
+    }
+  ]
+}

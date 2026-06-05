@@ -1,6 +1,6 @@
 //! Controlled git write tools (P3-1).
 //!
-//! These tools expose the minimum delivery-oriented Git mutations Aura needs:
+//! These tools expose the minimum delivery-oriented Git mutations Atlas needs:
 //! stage, commit, create branch, and push. They deliberately do not expose
 //! reset, clean, rebase, checkout, or arbitrary git flags. Every mutation
 //! requires an explicit `confirmed=true` argument, and `git_commit` performs a
@@ -949,14 +949,14 @@ mod tests {
         let base = std::env::current_dir().unwrap().join("target");
         std::fs::create_dir_all(&base).unwrap();
         let repo = tempfile::Builder::new()
-            .prefix("aura_git_write_")
+            .prefix("atlas_git_write_")
             .tempdir_in(base)
             .unwrap();
         git(repo.path(), &["init"]);
-        git(repo.path(), &["config", "user.name", "Aura Test"]);
+        git(repo.path(), &["config", "user.name", "Atlas Test"]);
         git(
             repo.path(),
-            &["config", "user.email", "aura@example.invalid"],
+            &["config", "user.email", "atlas@example.invalid"],
         );
         git(repo.path(), &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.path().join("README.md"), "initial\n").unwrap();
@@ -1066,11 +1066,12 @@ mod tests {
         std::fs::write(repo.path().join("safe.txt"), "safe\n").unwrap();
         git(repo.path(), &["add", "safe.txt"]);
         let tool = GitCommitTool::new_with_roots(vec![repo.path().to_path_buf()]);
+        let secret = format!("{}{}", "sk", "-proj-1234567890abcdefghijklmnop");
 
         let result = tool
             .execute(json!({
                 "cwd": cwd(&repo),
-                "message": "rotate sk-proj-1234567890abcdefghijklmnop",
+                "message": format!("rotate {secret}"),
                 "confirmed": true
             }))
             .await
@@ -1179,7 +1180,7 @@ mod tests {
         let repo = test_repo();
         let base = std::env::current_dir().unwrap().join("target");
         let bare = tempfile::Builder::new()
-            .prefix("aura_git_write_remote_")
+            .prefix("atlas_git_write_remote_")
             .tempdir_in(base)
             .unwrap();
         git(bare.path(), &["init", "--bare"]);

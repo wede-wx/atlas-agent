@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 pub enum VerificationSource {
     /// 任务自身 verify_json 字段。
     Task,
-    /// `<project_root>/.aura/verify.toml`。
+    /// `<project_root>/.atlas/verify.toml`。
     ProjectFile,
-    /// `~/.aura/verify.toml`。
+    /// `~/.atlas/verify.toml`。
     UserFile,
     /// 仓库脚本推断（package.json scripts / Cargo.toml 等）。
     RepoScripts,
@@ -37,7 +37,7 @@ pub struct VerifyConfig {
     /// `run_command` matches it, the agent main loop auto-runs the active task's
     /// verify mid-run (not only at done-time). `None` = off (the default), so
     /// there is zero added cost / behavior change unless a project opts in via
-    /// `auto_after_command = "<regex>"` in `.aura/verify.toml`.
+    /// `auto_after_command = "<regex>"` in `.atlas/verify.toml`.
     #[serde(default)]
     pub auto_after_command: Option<String>,
 }
@@ -114,8 +114,8 @@ pub fn builtin_config() -> VerifyConfig {
 ///
 /// 优先级（高→低）：
 /// 1. task verify_json （由调用方传入 task_verify）
-/// 2. `<project_root>/.aura/verify.toml`
-/// 3. `~/.aura/verify.toml`
+/// 2. `<project_root>/.atlas/verify.toml`
+/// 3. `~/.atlas/verify.toml`
 /// 4. 仓库脚本推断（目前未做，留 TODO，由 M3.4 实现）
 /// 5. 内置兜底
 pub fn load_verify_config(
@@ -134,9 +134,9 @@ pub fn load_verify_config(
         }
     }
 
-    // 2. project-root .aura/verify.toml
+    // 2. project-root .atlas/verify.toml
     if let Some(root) = project_root {
-        let path = root.join(".aura").join("verify.toml");
+        let path = root.join(".atlas").join("verify.toml");
         if let Ok(contents) = std::fs::read_to_string(&path) {
             if let Ok(cfg) = VerifyConfig::parse_toml(&contents) {
                 merged = merged.merge(&cfg);
@@ -144,9 +144,9 @@ pub fn load_verify_config(
         }
     }
 
-    // 3. user .aura/verify.toml
+    // 3. user .atlas/verify.toml
     if let Some(home) = user_home {
-        let path = home.join(".aura").join("verify.toml");
+        let path = home.join(".atlas").join("verify.toml");
         if let Ok(contents) = std::fs::read_to_string(&path) {
             if let Ok(cfg) = VerifyConfig::parse_toml(&contents) {
                 merged = merged.merge(&cfg);
@@ -185,10 +185,10 @@ fn task_commands_from_json(value: &serde_json::Value) -> Option<BTreeMap<String,
     }
 }
 
-/// 返回 `~/.aura` 目录路径（用于 `~/.aura/verify.toml`）。
-pub fn user_aura_home() -> Option<PathBuf> {
+/// 返回 `~/.atlas` 目录路径（用于 `~/.atlas/verify.toml`）。
+pub fn user_atlas_home() -> Option<PathBuf> {
     if let Some(home) = dirs::home_dir() {
-        return Some(home.join(".aura"));
+        return Some(home.join(".atlas"));
     }
     None
 }
@@ -354,14 +354,14 @@ mod tests {
     #[test]
     fn integration_load_verify_config_priority() {
         use uuid::Uuid;
-        let base = std::env::temp_dir().join(format!("aura_verify_int_{}", Uuid::new_v4()));
+        let base = std::env::temp_dir().join(format!("atlas_verify_int_{}", Uuid::new_v4()));
         let project_root = base.join("proj");
         let user_home = base.join("home");
-        std::fs::create_dir_all(project_root.join(".aura")).unwrap();
-        std::fs::create_dir_all(user_home.join(".aura")).unwrap();
+        std::fs::create_dir_all(project_root.join(".atlas")).unwrap();
+        std::fs::create_dir_all(user_home.join(".atlas")).unwrap();
 
         std::fs::write(
-            project_root.join(".aura").join("verify.toml"),
+            project_root.join(".atlas").join("verify.toml"),
             r#"[commands]
 rust_check = "PROJECT cargo check"
 project_only = "PROJECT only"
@@ -369,7 +369,7 @@ project_only = "PROJECT only"
         )
         .unwrap();
         std::fs::write(
-            user_home.join(".aura").join("verify.toml"),
+            user_home.join(".atlas").join("verify.toml"),
             r#"[commands]
 rust_check = "USER cargo check"
 user_only = "USER only"
@@ -393,7 +393,7 @@ user_only = "USER only"
         assert_eq!(
             cfg.commands.get("rust_check"),
             Some(&"PROJECT cargo check".to_string()),
-            "project .aura/verify.toml should beat user one"
+            "project .atlas/verify.toml should beat user one"
         );
         // project-only key present
         assert_eq!(

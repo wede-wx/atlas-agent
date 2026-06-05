@@ -61,10 +61,7 @@ impl Tool for SearchWebTool {
             .get("query")
             .and_then(|value| value.as_str())
             .ok_or_else(|| AgentError::Tool("缺少 query 参数。".to_string()))?;
-        let limit = args
-            .get("limit")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(5) as usize;
+        let limit = search_limit_arg(&args);
         let result = web::search_web(query, limit)
             .await
             .map_err(AgentError::Tool)?;
@@ -299,6 +296,17 @@ impl Tool for GetGithubTrendingTool {
     }
 }
 
+fn search_limit_arg(args: &serde_json::Value) -> usize {
+    args.get("limit")
+        .or_else(|| args.get("numResults"))
+        .or_else(|| args.get("num_results"))
+        .or_else(|| args.get("maxResults"))
+        .or_else(|| args.get("max_results"))
+        .or_else(|| args.get("count"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(5) as usize
+}
+
 /// P1-5: the fetched page body is the dominant text field — bound it with the
 /// shared head+tail limiter and attach `truncation` meta (mirrors read_file),
 /// keeping url/title/description structured. Pure (no I/O) for direct testing.
@@ -313,6 +321,21 @@ fn bound_web_page_data(result: &web::WebPageExtract, max_chars: usize) -> serde_
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_limit_arg_accepts_provider_aliases() {
+        assert_eq!(search_limit_arg(&serde_json::json!({})), 5);
+        assert_eq!(search_limit_arg(&serde_json::json!({"limit": 2})), 2);
+        assert_eq!(search_limit_arg(&serde_json::json!({"numResults": 3})), 3);
+        assert_eq!(search_limit_arg(&serde_json::json!({"num_results": 4})), 4);
+        assert_eq!(search_limit_arg(&serde_json::json!({"maxResults": 5})), 5);
+        assert_eq!(search_limit_arg(&serde_json::json!({"max_results": 6})), 6);
+        assert_eq!(search_limit_arg(&serde_json::json!({"count": 7})), 7);
+        assert_eq!(
+            search_limit_arg(&serde_json::json!({"limit": 2, "count": 7})),
+            2
+        );
+    }
 
     fn page(text: String) -> web::WebPageExtract {
         let chars = text.chars().count();

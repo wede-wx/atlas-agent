@@ -124,7 +124,7 @@ pub fn inspect_code_intelligence(
             reason: if request.lsp_diagnostics.is_some() {
                 "diagnostics parsed from real LSP-shaped payload".to_string()
             } else {
-                "no language-server session is running; Aura does not fake diagnostics from grep"
+                "no language-server session is running; Atlas does not fake diagnostics from grep"
                     .to_string()
             },
         },
@@ -147,7 +147,7 @@ pub fn prepare_lsp_session(spec: LspSessionSpec) -> Result<LspSessionPlan, Strin
     let reason = if available {
         "language-server command found on PATH; session may be started by the LSP host".to_string()
     } else {
-        "language-server command was not found on PATH; Aura will not fake LSP results".to_string()
+        "language-server command was not found on PATH; Atlas will not fake LSP results".to_string()
     };
     Ok(LspSessionPlan {
         workspace_root: root.to_string_lossy().to_string(),
@@ -404,7 +404,7 @@ mod tests {
         let root = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura-code-intel-{label}-{}", Uuid::new_v4()));
+            .join(format!("atlas-code-intel-{label}-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         root
     }
@@ -456,7 +456,7 @@ mod tests {
         let plan = prepare_lsp_session(LspSessionSpec {
             workspace_root: root.to_string_lossy().to_string(),
             language: "rust".to_string(),
-            server_command: Some("definitely-missing-aura-lsp".to_string()),
+            server_command: Some("definitely-missing-atlas-lsp".to_string()),
         })
         .unwrap();
         assert!(!plan.backend.available);

@@ -22,7 +22,7 @@ impl Tool for InvokeMcpTool {
     }
 
     fn description(&self) -> &str {
-        "Invoke an enabled MCP tool through Aura's MCP permission and audit boundary."
+        "Invoke an enabled MCP tool through Atlas's MCP permission and audit boundary."
     }
 
     fn schema(&self) -> ToolSchema {
@@ -47,7 +47,7 @@ impl Tool for InvokeMcpTool {
             name: self.name().to_string(),
             description: self.description().to_string(),
             label_zh: "调用 MCP 工具".to_string(),
-            description_zh: "通过 Aura 的 MCP 权限和审计边界调用已启用的 MCP 工具。".to_string(),
+            description_zh: "通过 Atlas 的 MCP 权限和审计边界调用已启用的 MCP 工具。".to_string(),
             capability_labels_zh: vec![
                 "MCP".to_string(),
                 "外部工具".to_string(),

@@ -512,7 +512,7 @@ fn search_browser_history_sources(
 
     for source in sources {
         let temp_path = std::env::temp_dir().join(format!(
-            "aura_history_{}_{}.sqlite",
+            "atlas_history_{}_{}.sqlite",
             std::process::id(),
             uuid::Uuid::new_v4()
         ));
@@ -543,7 +543,7 @@ fn search_browser_history_sources(
         count: items.len(),
         items,
         skipped,
-        privacy_note: "Aura only searches browser history when this tool or command is explicitly invoked; it does not watch current tabs or read page bodies from history.".to_string(),
+        privacy_note: "Atlas only searches browser history when this tool or command is explicitly invoked; it does not watch current tabs or read page bodies from history.".to_string(),
     })
 }
 
@@ -687,7 +687,7 @@ fn web_client() -> Result<Client, String> {
     Client::builder()
         .timeout(Duration::from_secs(15))
         .redirect(Policy::none())
-        .user_agent("Aura/0.1 web tools")
+        .user_agent("Atlas/0.1 web tools")
         .build()
         .map_err(|e| e.to_string())
 }
@@ -769,15 +769,15 @@ fn validate_public_http_url(raw: &str) -> Result<Url, String> {
 }
 
 fn allow_local_web_smoke_fetch() -> bool {
-    std::env::var("AURA_SMOKE_ALLOW_LOCAL_WEB_FETCH")
+    std::env::var("ATLAS_SMOKE_ALLOW_LOCAL_WEB_FETCH")
         .ok()
         .as_deref()
         == Some("1")
-        && std::env::var("AURA_SMOKE_RUN_ID")
+        && std::env::var("ATLAS_SMOKE_RUN_ID")
             .ok()
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
-        && std::env::var("AURA_HOME")
+        && std::env::var("ATLAS_HOME")
             .ok()
             .map(|value| value.to_ascii_lowercase().contains("tauri-smoke"))
             .unwrap_or(false)
@@ -1153,9 +1153,9 @@ mod tests {
 
     #[test]
     fn build_search_url_encodes_query() {
-        let (engine, url) = build_search_url("aura browser 搜索", Some("bing")).unwrap();
+        let (engine, url) = build_search_url("atlas browser 搜索", Some("bing")).unwrap();
         assert_eq!(engine, "bing");
-        assert!(url.contains("aura%20browser%20%E6%90%9C%E7%B4%A2"));
+        assert!(url.contains("atlas%20browser%20%E6%90%9C%E7%B4%A2"));
     }
 
     #[test]
@@ -1176,10 +1176,10 @@ mod tests {
     #[test]
     fn html_extraction_ignores_scripts_and_reads_title() {
         let html = r#"
-          <html><head><title>Aura &amp; Web</title><meta name="description" content="Local first"></head>
+          <html><head><title>Atlas &amp; Web</title><meta name="description" content="Local first"></head>
           <body><script>hidden()</script><main><h1>Hello</h1><p>Visible text.</p></main></body></html>
         "#;
-        assert_eq!(extract_title(html), "Aura & Web");
+        assert_eq!(extract_title(html), "Atlas & Web");
         assert_eq!(extract_meta_description(html), "Local first");
         assert_eq!(html_to_text(html), "Hello Visible text.");
     }
@@ -1188,27 +1188,27 @@ mod tests {
     fn parses_duckduckgo_result_fixture() {
         let html = r#"
           <div class="result">
-            <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Faura&amp;rut=abc">Aura Result</a>
+            <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fatlas&amp;rut=abc">Atlas Result</a>
             <a class="result__snippet">A useful snippet &amp; context.</a>
           </div>
         "#;
         let results = parse_duckduckgo_results(html, 5);
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "Aura Result");
-        assert_eq!(results[0].url, "https://example.com/aura");
+        assert_eq!(results[0].title, "Atlas Result");
+        assert_eq!(results[0].url, "https://example.com/atlas");
         assert_eq!(results[0].snippet, "A useful snippet & context.");
     }
 
     #[test]
     fn parses_duckduckgo_lite_result_fixture() {
         let html = r#"
-          <tr><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Faura-lite&amp;rut=abc" class='result-link'>Aura Lite Result</a></td></tr>
+          <tr><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fatlas-lite&amp;rut=abc" class='result-link'>Atlas Lite Result</a></td></tr>
           <tr><td class='result-snippet'>Lite snippet &amp; context.</td></tr>
         "#;
         let results = parse_duckduckgo_lite_results(html, 5);
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "Aura Lite Result");
-        assert_eq!(results[0].url, "https://example.com/aura-lite");
+        assert_eq!(results[0].title, "Atlas Lite Result");
+        assert_eq!(results[0].url, "https://example.com/atlas-lite");
         assert_eq!(results[0].snippet, "Lite snippet & context.");
     }
 
@@ -1266,7 +1266,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("aura_history_test_{unique}"));
+        let dir = std::env::temp_dir().join(format!("atlas_history_test_{unique}"));
         fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("History");
         let conn = Connection::open(&db_path).unwrap();
@@ -1284,8 +1284,8 @@ mod tests {
         conn.execute(
             "INSERT INTO urls (url, title, visit_count, last_visit_time) VALUES (?1, ?2, ?3, ?4)",
             params![
-                "https://example.com/aura-browser",
-                "Aura Browser Notes",
+                "https://example.com/atlas-browser",
+                "Atlas Browser Notes",
                 3,
                 13_300_000_000_000_000_i64
             ],
@@ -1300,7 +1300,7 @@ mod tests {
         }];
         let result = search_browser_history_sources("browser", "chrome", 10, &sources).unwrap();
         assert_eq!(result.count, 1);
-        assert_eq!(result.items[0].title, "Aura Browser Notes");
+        assert_eq!(result.items[0].title, "Atlas Browser Notes");
         assert_eq!(result.items[0].browser, "chrome");
         let _ = fs::remove_dir_all(dir);
     }

@@ -9,6 +9,8 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Sender;
 use tokio::time::{timeout, Duration};
+
+const PSEUDO_TOOL_PARSE_BLOCKED_MESSAGE: &str = "模型返回了无法解析的工具调用格式，已阻止展示原始 tool_call 文本。请重试、切换支持标准工具调用的模型，或让模型使用标准工具调用 JSON。";
 use uuid::Uuid;
 
 #[cfg(not(test))]
@@ -508,7 +510,7 @@ impl LLMClient for OpenAIClient {
                         if json_mode_failed {
                             "当前模型服务不支持 JSON mode 参数，已改用普通请求并保留 JSON 输出指令。"
                         } else {
-                            "当前模型服务不支持 Aura 的完整流式或工具调用参数，已改用兼容请求继续生成回复。"
+                            "当前模型服务不支持 Atlas 的完整流式或工具调用参数，已改用兼容请求继续生成回复。"
                         },
                     )),
                 )
@@ -843,6 +845,11 @@ impl LLMClient for OpenAIClient {
                     })
                     .await
                     .map_err(|_| AgentError::Cancelled)?;
+                // Never leak malformed pseudo tool-call protocol text to the UI. Some
+                // OpenAI-compatible models emit XML/JSON-looking tool calls as plain
+                // text; if the parser cannot normalize them, surface a safe diagnostic
+                // instead of showing raw <tool_call> blocks to the user.
+                content = PSEUDO_TOOL_PARSE_BLOCKED_MESSAGE.to_string();
             }
         }
 
@@ -936,22 +943,34 @@ fn openai_response_to_chat(openai_response: OpenAIResponse) -> Result<ChatRespon
             normalize_tool_call(raw, ToolCallSource::Standard).0
         })
         .collect();
+    let mut content = choice.message.content;
     if tool_calls.is_empty() {
         let finish = choice.finish_reason.trim().to_ascii_lowercase();
         let requires_tool_finish = matches!(
             finish.as_str(),
             "tool_calls" | "tool_call" | "function_call" | "tool_use"
         );
-        if requires_tool_finish {
-            tool_calls = parse_pseudo_tool_calls(
-                choice.message.content.as_deref(),
-                true,
-                ToolCallSource::TextJson,
-            );
+        let looks_like_xml_pseudo_tool_call = content
+            .as_deref()
+            .is_some_and(|value| value.trim_start().starts_with("<tool_call"));
+        if requires_tool_finish || looks_like_xml_pseudo_tool_call {
+            let pseudo_source = if looks_like_xml_pseudo_tool_call {
+                ToolCallSource::TextXml
+            } else {
+                ToolCallSource::TextJson
+            };
+            tool_calls =
+                parse_pseudo_tool_calls(content.as_deref(), requires_tool_finish, pseudo_source);
+            if tool_calls.is_empty()
+                && content
+                    .as_deref()
+                    .is_some_and(is_potential_pseudo_tool_buffer)
+            {
+                content = Some(PSEUDO_TOOL_PARSE_BLOCKED_MESSAGE.to_string());
+            }
         }
     }
-    let content =
-        chat_response_content_for_tool_turn(choice.message.content, tool_calls.is_empty());
+    let content = chat_response_content_for_tool_turn(content, tool_calls.is_empty());
 
     Ok(ChatResponse {
         content,
@@ -1476,6 +1495,48 @@ mod tests {
     }
 
     #[test]
+    fn xml_pseudo_tool_call_is_parsed_even_when_finish_reason_is_stop() {
+        let payload = r#"{
+            "choices": [{
+                "message": {
+                    "content": "<tool_call><function=web_search><parameter=query=MiMo vision</parameter><parameter=numResults>5</parameter></function></tool_call>"
+                },
+                "finish_reason": "stop"
+            }]
+        }"#;
+        let response: OpenAIResponse = serde_json::from_str(payload).unwrap();
+        let chat = openai_response_to_chat(response).unwrap();
+
+        assert_eq!(chat.tool_calls.len(), 1);
+        assert_eq!(chat.tool_calls[0].name, "search_web");
+        assert_eq!(chat.tool_calls[0].arguments["query"], "MiMo vision");
+        assert_eq!(chat.tool_calls[0].arguments["limit"], 5);
+        assert!(chat.content.is_none());
+    }
+
+    #[test]
+    fn malformed_xml_pseudo_tool_call_is_sanitized_for_non_streaming_response() {
+        let payload = r#"{
+            "choices": [{
+                "message": {
+                    "content": "<tool_call><function=search_web><parameter=query>Atlas"
+                },
+                "finish_reason": "stop"
+            }]
+        }"#;
+        let response: OpenAIResponse = serde_json::from_str(payload).unwrap();
+        let chat = openai_response_to_chat(response).unwrap();
+
+        assert!(chat.tool_calls.is_empty());
+        let content = chat
+            .content
+            .expect("sanitized diagnostic should be returned");
+        assert!(content.contains("无法解析的工具调用格式"));
+        assert!(!content.contains("<tool_call"));
+        assert!(!content.contains("<function="));
+    }
+
+    #[test]
     fn standard_tool_call_aliases_num_results_to_limit() {
         let payload = r#"{
             "choices": [{
@@ -1905,6 +1966,128 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[tokio::test]
+    async fn streaming_mimo_function_equals_tool_call_is_buffered_and_not_sent_to_ui() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.contains("\"stream\":true"));
+            assert!(request.contains("\"tools\""));
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"<tool_call type=\\\"function\\\"><function=web_search><parameter=query>mimo vision</parameter><parameter=count>3</parameter></function></tool_call>\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = OpenAIClient::new("test-key".to_string(), "test-model".to_string())
+            .with_base_url(format!("http://{addr}"));
+        let (tx, mut rx) = mpsc::channel(16);
+        let result = client
+            .chat_completion_stream(
+                vec![Message::plain(
+                    Role::User,
+                    "你上网查查 mimo 的哪个模型可以识别图片",
+                )],
+                Some(vec![ToolSchema {
+                    name: "search_web".to_string(),
+                    description: "Search the web".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                }]),
+                Some(tx),
+            )
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+        assert!(result.content.is_none());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "search_web");
+        assert_eq!(result.tool_calls[0].arguments["query"], "mimo vision");
+        assert_eq!(result.tool_calls[0].arguments["limit"], 3);
+
+        while let Ok(Some(event)) = timeout(Duration::from_millis(100), rx.recv()).await {
+            match event {
+                AgentEvent::ResponseDelta { content, .. }
+                | AgentEvent::ResponseCompleted { content, .. } => {
+                    assert!(
+                        !content.contains("<tool_call"),
+                        "raw tool protocol must not reach UI events"
+                    );
+                    assert!(
+                        !content.contains("<function="),
+                        "raw function dialect must not reach UI events"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_malformed_pseudo_tool_call_is_sanitized_and_not_sent_raw_to_ui() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.contains("\"stream\":true"));
+            assert!(request.contains("\"tools\""));
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"<tool_call><function=search_web><parameter=query>Atlas\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = OpenAIClient::new("test-key".to_string(), "test-model".to_string())
+            .with_base_url(format!("http://{addr}"));
+        let (tx, mut rx) = mpsc::channel(16);
+        let result = client
+            .chat_completion_stream(
+                vec![Message::plain(Role::User, "你上网查查 Atlas")],
+                Some(vec![ToolSchema {
+                    name: "search_web".to_string(),
+                    description: "Search the web".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                }]),
+                Some(tx),
+            )
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+        assert!(result.tool_calls.is_empty());
+        let content = result.content.expect("safe diagnostic should be returned");
+        assert!(content.contains("无法解析的工具调用格式"));
+        assert!(!content.contains("<tool_call"));
+        assert!(!content.contains("<function="));
+
+        let mut saw_parse_failure = false;
+        let mut saw_safe_content = false;
+        while let Ok(Some(event)) = timeout(Duration::from_millis(100), rx.recv()).await {
+            match event {
+                AgentEvent::ModelToolParseDiagnostic { parsed, reason, .. } => {
+                    saw_parse_failure |=
+                        !parsed && reason.as_deref() == Some("pseudo_tool_protocol_parse_failed");
+                }
+                AgentEvent::ResponseDelta { content, .. }
+                | AgentEvent::ResponseCompleted { content, .. } => {
+                    assert!(!content.contains("<tool_call"));
+                    assert!(!content.contains("<function="));
+                    saw_safe_content |= content.contains("无法解析的工具调用格式");
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_parse_failure);
+        assert!(saw_safe_content);
     }
 
     #[tokio::test]

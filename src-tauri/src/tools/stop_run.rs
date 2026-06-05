@@ -39,14 +39,14 @@ impl Tool for StopRunTool {
     }
 
     fn description(&self) -> &str {
-        "Cancel the current Aura Agent run."
+        "Cancel the current Atlas Agent run."
     }
 
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: self.name().to_string(),
             description:
-                "Cancel the current Aura Agent run. Use only when the user clearly asks to stop."
+                "Cancel the current Atlas Agent run. Use only when the user clearly asks to stop."
                     .to_string(),
             parameters: serde_json::json!({
                 "type": "object",

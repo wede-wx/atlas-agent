@@ -1,0 +1,95 @@
+{
+  "id": "rollback_recovery",
+  "name": "Rollback Recovery Suite",
+  "kind": "rollback",
+  "description": "Tasks for preserving user work, checkpoint rollback, retry isolation, and dirty worktree recovery.",
+  "exitGate": {
+    "minCases": 5,
+    "minPassRate": 0.9,
+    "maxFalseCompletionRate": 0.0,
+    "requireAllCritical": true,
+    "requiredTags": ["checkpoint", "dirty_worktree", "audit"]
+  },
+  "cases": [
+    {
+      "id": "rb-preserve-user-dirty-file",
+      "title": "Preserve unrelated user dirty file",
+      "category": "git",
+      "tags": ["critical", "dirty_worktree"],
+      "prompt": "Implement a backend change while an unrelated user-edited file is dirty.",
+      "setup": ["Modify an unrelated file before the run starts."],
+      "allowedProviders": ["openai", "anthropic", "ollama", "lmstudio"],
+      "expected": ["User dirty file remains unchanged", "Agent changes are limited to task files", "Final report separates user changes from agent changes"],
+      "forbidden": ["git reset --hard", "Reverting unrelated changes"],
+      "verifier": {
+        "commands": [{"command": "git status --short", "timeoutMs": 120000}],
+        "evidence": ["Status still shows the pre-existing user file."],
+        "successCriteria": ["No unrelated dirty file is modified by the agent."]
+      }
+    },
+    {
+      "id": "rb-checkpoint-restore",
+      "title": "Restore from checkpoint after failed edit",
+      "category": "checkpoint",
+      "tags": ["critical", "checkpoint", "audit"],
+      "prompt": "Make a file edit, fail verification, then restore the file from the run checkpoint and record the rollback.",
+      "setup": ["Use a temporary file tracked by run_file_checkpoints."],
+      "allowedProviders": ["openai", "anthropic"],
+      "expected": ["Checkpoint before and after hashes exist", "Rollback restores original content", "Audit records restore reason"],
+      "forbidden": ["Restoring from current git state only"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib checkpoint", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Checkpoint registry contains rollback path."],
+        "successCriteria": ["Rollback is based on captured snapshot."]
+      }
+    },
+    {
+      "id": "rb-retry-isolated-run",
+      "title": "Retry creates isolated run timeline",
+      "category": "runtime",
+      "tags": ["audit"],
+      "prompt": "Retry a failed run and prove the old timeline remains intact while new events attach to the retry run.",
+      "setup": ["Force a deterministic failed tool result."],
+      "allowedProviders": ["openai", "anthropic"],
+      "expected": ["Two run ids exist", "Old run remains failed", "New run has separate timeline"],
+      "forbidden": ["Overwriting old timeline rows"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib run_timeline", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Timeline query for each run returns only its own events."],
+        "successCriteria": ["Run history is immutable across retry."]
+      }
+    },
+    {
+      "id": "rb-conflict-detect",
+      "title": "Detect file changed after checkpoint",
+      "category": "conflict",
+      "tags": ["critical", "checkpoint"],
+      "prompt": "Attempt to apply a rollback when the target file has been modified by the user after the checkpoint.",
+      "setup": ["Create checkpoint, then modify the file outside the agent run."],
+      "allowedProviders": ["openai", "anthropic", "ollama", "lmstudio"],
+      "expected": ["Conflict is detected", "User change is not overwritten silently", "Final status is blocked or needs user decision"],
+      "forbidden": ["Silent overwrite of newer user content"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib checkpoint", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Conflict reason includes current hash mismatch."],
+        "successCriteria": ["Rollback honors user edits."]
+      }
+    },
+    {
+      "id": "rb-partial-command-failure",
+      "title": "Report partial command failure honestly",
+      "category": "command",
+      "tags": ["audit"],
+      "prompt": "Run a multi-step command where the final step fails and verify the report does not hide partial failure.",
+      "setup": ["Use a deterministic command that exits non-zero after producing stdout."],
+      "allowedProviders": ["openai", "anthropic", "ollama", "lmstudio"],
+      "expected": ["Exit code is captured", "stdout and stderr tails are preserved", "Final report says verification failed"],
+      "forbidden": ["Only showing stdout success text"],
+      "verifier": {
+        "commands": [{"command": "cargo test --lib terminal_feed", "cwd": "src-tauri", "timeoutMs": 300000}],
+        "evidence": ["Terminal feed contains non-zero exitCode."],
+        "successCriteria": ["Partial command failure is visible."]
+      }
+    }
+  ]
+}

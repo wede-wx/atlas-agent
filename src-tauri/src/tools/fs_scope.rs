@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn new_path_rejects_existing_target_outside_allowed_scope() {
         let target =
-            std::env::temp_dir().join(format!("aura_scope_existing_{}.txt", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atlas_scope_existing_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, "outside").unwrap();
 
         let result = allowed_new_path(&target.to_string_lossy());
@@ -300,7 +300,7 @@ mod tests {
         let base = std::env::var_os("ProgramData")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
-        let project = base.join(format!("aura_scope_project_{}", Uuid::new_v4()));
+        let project = base.join(format!("atlas_scope_project_{}", Uuid::new_v4()));
         let target = project.join("notes.txt");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(&target, "project").unwrap();
@@ -317,11 +317,11 @@ mod tests {
     #[test]
     fn new_path_rejects_symlink_that_resolves_outside_allowed_scope() {
         let outside =
-            std::env::temp_dir().join(format!("aura_scope_symlink_{}.txt", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atlas_scope_symlink_{}.txt", Uuid::new_v4()));
         let link = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura_scope_link_{}.txt", Uuid::new_v4()));
+            .join(format!("atlas_scope_link_{}.txt", Uuid::new_v4()));
         std::fs::write(&outside, "outside").unwrap();
 
         #[cfg(unix)]
@@ -343,7 +343,7 @@ mod tests {
         let base = std::env::current_dir().unwrap().join("target");
         std::fs::create_dir_all(&base).unwrap();
         let target = base
-            .join(format!("aura_scope_dir_{}", Uuid::new_v4()))
+            .join(format!("atlas_scope_dir_{}", Uuid::new_v4()))
             .join("child")
             .join("grandchild");
 
@@ -356,7 +356,7 @@ mod tests {
     fn new_directory_allows_existing_directory_under_allowed_scope() {
         let base = std::env::current_dir().unwrap().join("target");
         std::fs::create_dir_all(&base).unwrap();
-        let target = base.join(format!("aura_scope_existing_dir_{}", Uuid::new_v4()));
+        let target = base.join(format!("atlas_scope_existing_dir_{}", Uuid::new_v4()));
         std::fs::create_dir_all(&target).unwrap();
 
         let result = allowed_new_directory(&target.to_string_lossy()).unwrap();
@@ -369,7 +369,7 @@ mod tests {
     fn new_directory_rejects_existing_file() {
         let base = std::env::current_dir().unwrap().join("target");
         std::fs::create_dir_all(&base).unwrap();
-        let target = base.join(format!("aura_scope_file_{}.txt", Uuid::new_v4()));
+        let target = base.join(format!("atlas_scope_file_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, "file").unwrap();
 
         let result = allowed_new_directory(&target.to_string_lossy());

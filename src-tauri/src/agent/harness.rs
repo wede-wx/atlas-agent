@@ -198,6 +198,10 @@ impl AgentHarnessRun {
                 AgentEvent::OperationFailed { .. } => "operation_failed",
                 AgentEvent::ToolCall { .. } => "tool_call",
                 AgentEvent::ToolResult { .. } => "tool_result",
+                AgentEvent::ToolVisibilityDecision { .. } => "tool_visibility_decision",
+                AgentEvent::ModelToolParseDiagnostic { .. } => "model_tool_parse_diagnostic",
+                AgentEvent::UnknownToolRequested { .. } => "unknown_tool_requested",
+                AgentEvent::ToolNormalizationApplied { .. } => "tool_normalization_applied",
                 AgentEvent::RunEvent { event } => match event {
                     crate::agent::AgentRunEvent::Started { .. } => "run_started",
                     crate::agent::AgentRunEvent::Iteration { .. } => "run_iteration",

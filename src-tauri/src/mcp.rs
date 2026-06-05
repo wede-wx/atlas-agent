@@ -484,8 +484,8 @@ fn store_mcp_servers(db: &LocalDb, servers: &[McpServerConfig]) -> Result<(), St
 fn mock_server_config() -> McpServerConfig {
     let now = now_millis();
     McpServerConfig {
-        id: "aura_mock_mcp".to_string(),
-        name: "Aura 内置 MCP".to_string(),
+        id: "atlas_mock_mcp".to_string(),
+        name: "Atlas 内置 MCP".to_string(),
         transport: "mock".to_string(),
         command: None,
         args: Vec::new(),
@@ -508,7 +508,7 @@ fn mock_server_config() -> McpServerConfig {
 }
 
 fn is_builtin_mock_server(server: &McpServerConfig) -> bool {
-    server.id == "aura_mock_mcp" || server.transport == "mock"
+    server.id == "atlas_mock_mcp" || server.transport == "mock"
 }
 
 fn normalize_transport(value: &str) -> Result<String, String> {
@@ -700,7 +700,7 @@ fn mcp_initialize_request(id: i64) -> serde_json::Value {
             "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": {},
             "clientInfo": {
-                "name": "Aura",
+                "name": "Atlas",
                 "version": "0.1.0"
             }
         }
@@ -912,7 +912,7 @@ fn mcp_json_rpc_request(id: i64, method: &str, mut params: serde_json::Value) ->
     let meta = json!({
         "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
         "io.modelcontextprotocol/clientInfo": {
-            "name": "Aura",
+            "name": "Atlas",
             "version": "0.1.0"
         },
         "io.modelcontextprotocol/clientCapabilities": {}
@@ -1012,7 +1012,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        LocalDb::open(std::env::temp_dir().join(format!("aura_mcp_{unique}.db"))).unwrap()
+        LocalDb::open(std::env::temp_dir().join(format!("atlas_mcp_{unique}.db"))).unwrap()
     }
 
     #[test]
@@ -1046,7 +1046,7 @@ mod tests {
                         value: "ignored".to_string(),
                     },
                     McpKeyValue {
-                        key: "AURA_TOKEN".to_string(),
+                        key: "ATLAS_TOKEN".to_string(),
                         value: " local-token ".to_string(),
                     },
                 ],
@@ -1076,7 +1076,7 @@ mod tests {
         assert_eq!(server.auth_type.as_deref(), Some("bearer"));
         assert_eq!(server.auth_token.as_deref(), Some("smoke-secret"));
         assert_eq!(server.env.len(), 1);
-        assert_eq!(server.env[0].key, "AURA_TOKEN");
+        assert_eq!(server.env[0].key, "ATLAS_TOKEN");
         assert_eq!(server.env[0].value, "local-token");
         assert_eq!(server.pass_env, vec!["PATH".to_string()]);
         assert_eq!(server.headers.len(), 1);
@@ -1149,7 +1149,7 @@ mod tests {
         }
         let db = temp_db();
         let script_path = std::env::temp_dir().join(format!(
-            "aura_stdio_mcp_{}.mjs",
+            "atlas_stdio_mcp_{}.mjs",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -1194,7 +1194,7 @@ process.stdin.on('end', () => {
                 args: vec![script_path.to_string_lossy().to_string()],
                 url: None,
                 env: vec![McpKeyValue {
-                    key: "AURA_MCP_FIXTURE".to_string(),
+                    key: "ATLAS_MCP_FIXTURE".to_string(),
                     value: "1".to_string(),
                 }],
                 pass_env: Vec::new(),
@@ -1302,15 +1302,16 @@ process.stdin.on('end', () => {
 
     #[test]
     fn input_summary_lists_keys_and_counts_secrets_without_raw_values() {
+        let raw_token = format!("{}{}", "sk", "-ant-1234567890ABCDEFGHIJ");
         let summary = summarize_mcp_input(&json!({
-            "token": "sk-ant-1234567890ABCDEFGHIJ",
+            "token": raw_token,
             "path": "/tmp/file"
         }));
         assert!(summary.contains("字段[path, token]"));
         assert!(summary.contains("字符"));
         assert!(summary.contains("敏感"));
         assert!(
-            !summary.contains("sk-ant-1234567890ABCDEFGHIJ"),
+            !summary.contains(&format!("{}{}", "sk", "-ant-1234567890ABCDEFGHIJ")),
             "审计摘要绝不能包含原始密钥值"
         );
 

@@ -295,7 +295,8 @@ mod tests {
     use uuid::Uuid;
 
     fn temp_db() -> LocalDb {
-        let path = std::env::temp_dir().join(format!("aura_file_write_test_{}.db", Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("atlas_file_write_test_{}.db", Uuid::new_v4()));
         LocalDb::open(path).unwrap()
     }
 
@@ -314,12 +315,12 @@ mod tests {
         let target = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura_write_tool_{}.txt", Uuid::new_v4()));
+            .join(format!("atlas_write_tool_{}.txt", Uuid::new_v4()));
         let tool = WriteFileTool::new(temp_db());
         let result = tool
             .execute(serde_json::json!({
                 "path": target.to_string_lossy(),
-                "content": "aura write tool test",
+                "content": "atlas write tool test",
                 "reason": "test"
             }))
             .await
@@ -331,7 +332,7 @@ mod tests {
         ));
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
-            "aura write tool test"
+            "atlas write tool test"
         );
         let _ = std::fs::remove_file(target);
     }
@@ -343,7 +344,7 @@ mod tests {
         let target = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura_write_checkpoint_{}.txt", Uuid::new_v4()));
+            .join(format!("atlas_write_checkpoint_{}.txt", Uuid::new_v4()));
         let tool = WriteFileTool::new_with_roots(db.clone(), Vec::new(), Some(session_id));
 
         let result = tool
@@ -385,8 +386,9 @@ mod tests {
         let target = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura_write_tool_{}.html", Uuid::new_v4()));
-        let html = "<!doctype html><html><body><script>console.log('aura');</script></body></html>";
+            .join(format!("atlas_write_tool_{}.html", Uuid::new_v4()));
+        let html =
+            "<!doctype html><html><body><script>console.log('atlas');</script></body></html>";
         let tool = WriteFileTool::new(temp_db());
         let result = tool
             .execute(serde_json::json!({
@@ -412,7 +414,7 @@ mod tests {
         let target = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura_write_secret_{}.txt", Uuid::new_v4()));
+            .join(format!("atlas_write_secret_{}.txt", Uuid::new_v4()));
         let tool = WriteFileTool::new(temp_db());
         let result = tool
             .execute(serde_json::json!({
@@ -437,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn write_file_tool_rejects_paths_outside_allowed_scope() {
         let target =
-            std::env::temp_dir().join(format!("aura_write_tool_reject_{}.txt", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atlas_write_tool_reject_{}.txt", Uuid::new_v4()));
         let tool = WriteFileTool::new(temp_db());
         let result = tool
             .execute(serde_json::json!({
@@ -454,7 +456,7 @@ mod tests {
     #[tokio::test]
     async fn prepare_file_write_tool_rejects_paths_outside_allowed_scope() {
         let target =
-            std::env::temp_dir().join(format!("aura_prepare_tool_reject_{}.txt", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atlas_prepare_tool_reject_{}.txt", Uuid::new_v4()));
         let tool = PrepareFileWriteTool::new(temp_db());
         let result = tool
             .execute(serde_json::json!({

@@ -670,7 +670,7 @@ mod tests {
     use uuid::Uuid;
 
     fn fresh_db() -> (std::path::PathBuf, LocalDb, String) {
-        let path = std::env::temp_dir().join(format!("aura_final_audit_{}.db", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("atlas_final_audit_{}.db", Uuid::new_v4()));
         let db = LocalDb::open(path.clone()).expect("open");
         let session = db.create_session("final-audit-test").expect("session");
         (path, db, session.id)

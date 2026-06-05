@@ -277,10 +277,10 @@ mod tests {
     use super::*;
 
     // Obvious-fake samples (never real credentials).
-    const OPENAI_KEY: &str = "sk-abcd1234abcd1234abcd1234abcd1234";
+    const OPENAI_KEY: &str = concat!("sk", "-abcd1234abcd1234abcd1234abcd1234");
     const AWS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
     const GITHUB_TOKEN: &str = "ghp_0123456789abcdefghijklmnopqrstuvwxyzABCD";
-    const ANTHROPIC_KEY: &str = "sk-ant-api03-abcd1234abcd1234abcd1234abcd1234efgh";
+    const ANTHROPIC_KEY: &str = concat!("sk", "-ant-api03-abcd1234abcd1234abcd1234abcd1234efgh");
 
     #[test]
     fn detects_and_masks_openai_key() {

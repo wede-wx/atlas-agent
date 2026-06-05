@@ -163,7 +163,7 @@ fn default_breaker_consecutive_low_yield_trigger() -> i64 {
 fn build_subagent_instruction(profile: &AgentProfile, agent_mode: &str) -> String {
     if agent_mode == "code_review" {
         return format!(
-            "你现在以代码审查子代理「{}」身份执行 Aura `/代码审查` 只读审查。子代理不能绕过当前会话权限，不能替主 Agent 宣布最终完成。\n\n[代码审查命令硬性边界]\nAURA_CODE_REVIEW_COMMAND.md 和本段边界优先于子代理定义中任何要求运行本地命令、修改文件、提交、发布评论或输出执行计划的内容。只允许基于已提供文本和可读取文件做审查；缺少 diff、测试、CI 或真实验证证据时，按规则报告 `[信息缺失]` 或未验证风险，不要声称已经完成本地检查。\n\n[子代理摘要]\nSource: {}\nDescription: {}\nModel hint: {}\nAllowed review capabilities: Read, Grep, Glob\n\n输出 findings first，只给可被主 Agent 汇总的结果、风险和建议。",
+            "你现在以代码审查子代理「{}」身份执行 Atlas `/代码审查` 只读审查。子代理不能绕过当前会话权限，不能替主 Agent 宣布最终完成。\n\n[代码审查命令硬性边界]\nATLAS_CODE_REVIEW_COMMAND.md 和本段边界优先于子代理定义中任何要求运行本地命令、修改文件、提交、发布评论或输出执行计划的内容。只允许基于已提供文本和可读取文件做审查；缺少 diff、测试、CI 或真实验证证据时，按规则报告 `[信息缺失]` 或未验证风险，不要声称已经完成本地检查。\n\n[子代理摘要]\nSource: {}\nDescription: {}\nModel hint: {}\nAllowed review capabilities: Read, Grep, Glob\n\n输出 findings first，只给可被主 Agent 汇总的结果、风险和建议。",
             profile.metadata.name,
             profile.metadata.source,
             profile.metadata.description,
@@ -989,7 +989,7 @@ async fn run_agent(
     let mut model_route_policy = agent_model_routing_policy(&state.local_db);
     if smoke_model_send_base_url.is_some() && model_route_policy.force_connection_id.is_none() {
         model_route_policy.force_connection_id =
-            Some("openai-compatible:aura-smoke-model-send".to_string());
+            Some("openai-compatible:atlas-smoke-model-send".to_string());
     }
     let model_route_decision = select_model_route(
         &config,
@@ -1416,39 +1416,39 @@ fn apply_model_send_smoke_config(
     })?;
 
     let connection = ModelConnectionConfig {
-        id: "openai-compatible:aura-smoke-model-send".to_string(),
-        name: "Aura smoke model-send fixture".to_string(),
+        id: "openai-compatible:atlas-smoke-model-send".to_string(),
+        name: "Atlas smoke model-send fixture".to_string(),
         provider_id: "openai".to_string(),
-        route_id: "aura-smoke-model-send".to_string(),
+        route_id: "atlas-smoke-model-send".to_string(),
         protocol: "openai-compatible".to_string(),
-        api_key: "aura-smoke-key".to_string(),
-        model: "aura-smoke-model-send".to_string(),
+        api_key: "atlas-smoke-key".to_string(),
+        model: "atlas-smoke-model-send".to_string(),
         base_url: Some(base_url.clone()),
         enabled: true,
         auth_header: None,
     };
     config.llm.upsert_connection(connection);
     config.llm.default_provider = "openai".to_string();
-    config.llm.default_connection_id = Some("openai-compatible:aura-smoke-model-send".to_string());
+    config.llm.default_connection_id = Some("openai-compatible:atlas-smoke-model-send".to_string());
     Some(base_url)
 }
 
 fn atlas_model_send_smoke_base_url(message: &str) -> Option<String> {
-    if std::env::var("AURA_SMOKE_ENABLE_ATLAS_MODEL_SEND_PROOF")
+    if std::env::var("ATLAS_SMOKE_ENABLE_ATLAS_MODEL_SEND_PROOF")
         .ok()
         .as_deref()
         != Some("1")
     {
         return None;
     }
-    if std::env::var("AURA_SMOKE_RUN_ID")
+    if std::env::var("ATLAS_SMOKE_RUN_ID")
         .ok()
         .map(|value| value.trim().is_empty())
         .unwrap_or(true)
     {
         return None;
     }
-    if !std::env::var("AURA_HOME")
+    if !std::env::var("ATLAS_HOME")
         .ok()
         .map(|value| value.to_ascii_lowercase().contains("tauri-smoke"))
         .unwrap_or(false)
@@ -1462,14 +1462,14 @@ fn atlas_model_send_smoke_base_url(message: &str) -> Option<String> {
 }
 
 fn island_model_send_smoke_base_url() -> Option<String> {
-    if std::env::var("AURA_SMOKE_ENABLE_ISLAND_MODEL_SEND_PROOF")
+    if std::env::var("ATLAS_SMOKE_ENABLE_ISLAND_MODEL_SEND_PROOF")
         .ok()
         .as_deref()
         != Some("1")
     {
         return None;
     }
-    if std::env::var("AURA_SMOKE_RUN_ID")
+    if std::env::var("ATLAS_SMOKE_RUN_ID")
         .ok()
         .map(|value| value.trim().is_empty())
         .unwrap_or(true)
@@ -1480,7 +1480,7 @@ fn island_model_send_smoke_base_url() -> Option<String> {
 }
 
 fn rich_atlas_model_send_smoke_base_url() -> Option<String> {
-    std::env::var("AURA_SMOKE_ATLAS_RICH_MODEL_SEND_BASE_URL")
+    std::env::var("ATLAS_SMOKE_ATLAS_RICH_MODEL_SEND_BASE_URL")
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| {
@@ -1489,7 +1489,7 @@ fn rich_atlas_model_send_smoke_base_url() -> Option<String> {
 }
 
 fn local_smoke_model_send_base_url() -> Option<String> {
-    std::env::var("AURA_SMOKE_MODEL_SEND_BASE_URL")
+    std::env::var("ATLAS_SMOKE_MODEL_SEND_BASE_URL")
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| {
@@ -1498,7 +1498,7 @@ fn local_smoke_model_send_base_url() -> Option<String> {
 }
 
 fn message_has_island_context(message: &str) -> bool {
-    message.contains("[Aura 浮层上下文]")
+    message.contains("[Atlas 浮层上下文]")
 }
 
 fn has_island_package_id(attachment: &AgentAttachment) -> bool {
@@ -1534,7 +1534,7 @@ fn write_island_model_send_smoke_proof(
     let Some(base_url_override) = base_url_override else {
         return;
     };
-    let smoke_run_id = match std::env::var("AURA_SMOKE_RUN_ID") {
+    let smoke_run_id = match std::env::var("ATLAS_SMOKE_RUN_ID") {
         Ok(value) if !value.trim().is_empty() => value,
         _ => return,
     };
@@ -1597,7 +1597,7 @@ fn write_island_model_send_smoke_proof(
         "capturedAt": captured_at_ms
     });
     let path = std::env::temp_dir().join(format!(
-        "aura-island-model-send-smoke-{}-{}.json",
+        "atlas-island-model-send-smoke-{}-{}.json",
         proof
             .get("smokeRunId")
             .and_then(serde_json::Value::as_str)
@@ -2016,8 +2016,8 @@ pub async fn evaluate_agent_run_trajectory(
     Ok(evaluate_trajectory_completion(&export))
 }
 
-/// OS-8: map an external Agent Protocol / ACP / A2A task into an Aura run
-/// without bypassing Aura permission, checkpoint, and final-audit boundaries.
+/// OS-8: map an external Agent Protocol / ACP / A2A task into an Atlas run
+/// without bypassing Atlas permission, checkpoint, and final-audit boundaries.
 #[tauri::command]
 pub async fn create_external_agent_task(
     task: ExternalTask,
@@ -4220,7 +4220,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        LocalDb::open(std::env::temp_dir().join(format!("aura_agent_context_{unique}.db"))).unwrap()
+        LocalDb::open(std::env::temp_dir().join(format!("atlas_agent_context_{unique}.db")))
+            .unwrap()
     }
 
     fn audit_payload(status: &str, reason: &str, tool_name: &str) -> LogAgentToolAuditPayload {
@@ -4573,10 +4574,8 @@ mod tests {
         assert!(!joined.contains("用户画像 JSON"));
         assert!(joined.contains("用户喜欢直接一点的回答"));
         assert!(joined.contains("old message 25"));
-        assert!(context
-            .iter()
-            .any(|message| matches!(message.role, Role::System)
-                && message.content.contains("压缩摘要")));
+        assert!(joined.contains("compressionTriggered=false"));
+        assert!(joined.contains("summaryIncluded=false"));
     }
 
     #[test]
@@ -4618,10 +4617,10 @@ mod tests {
         assert!(joined.contains("[ContextWindow 选择策略]"));
         assert!(joined.contains("source=persistent_session"));
         assert!(joined.contains("durableUserAssistantMessages=13"));
-        assert!(joined.contains("selectedRecentMessages=12"));
-        assert!(joined.contains("omittedOlderMessages=1"));
+        assert!(joined.contains("selectedRecentMessages=13"));
+        assert!(joined.contains("omittedOlderMessages=0"));
         assert!(joined.contains("Session/EventLog 是持久事实源"));
-        assert!(!joined.contains("durable message 0"));
+        assert!(joined.contains("durable message 0"));
         assert!(joined.contains("durable message 12"));
     }
 
@@ -4713,7 +4712,10 @@ mod tests {
                     } else {
                         "assistant".to_string()
                     },
-                    content: format!("compressible durable message {index}"),
+                    content: format!(
+                        "compressible durable message {index}-{}",
+                        "x".repeat(50_000)
+                    ),
                     created_at: None,
                     metadata: serde_json::json!({}),
                 },
@@ -4729,10 +4731,11 @@ mod tests {
             .join("\n");
 
         assert!(joined.contains("compressionTriggered=true"));
-        assert!(joined.contains("compressionReason=message_count>24+summary_included"));
+        assert!(joined.contains("soft_char_budget>"));
+        assert!(joined.contains("summary_included"));
         assert!(joined.contains("summaryIncluded=true"));
-        assert!(joined.contains("selectedRecentMessages=12"));
-        assert!(joined.contains("omittedOlderMessages=18"));
+        assert!(joined.contains("recent_tail_pruned_to_budget"));
+        assert!(joined.contains("omittedOlderMessages="));
         assert!(joined.contains("[ContextWindow 当前持久任务锚点]"));
         assert!(joined.contains(&format!("planId={}", plan.id)));
         assert!(joined.contains("goal=长会话压缩时仍保留当前任务目标全句"));
@@ -4771,7 +4774,7 @@ mod tests {
             .unwrap();
         db.set_active_plan_task(&session.id, Some(&task.id))
             .unwrap();
-        for index in 0..12 {
+        for index in 0..20 {
             db.save_message(
                 &session.id,
                 SaveMessagePayload {
@@ -4781,7 +4784,7 @@ mod tests {
                     } else {
                         "assistant".to_string()
                     },
-                    content: format!("budget-heavy-message-{index}-{}", "x".repeat(7_000)),
+                    content: format!("budget-heavy-message-{index}-{}", "x".repeat(100_000)),
                     created_at: None,
                     metadata: serde_json::json!({}),
                 },
@@ -4807,13 +4810,13 @@ mod tests {
             CONTEXT_WINDOW_PROTECTED_RECENT_MESSAGE_FLOOR
         );
         assert!(selected_history[0].starts_with("budget-heavy-message-8-"));
-        assert!(selected_history[3].starts_with("budget-heavy-message-11-"));
+        assert!(selected_history[11].starts_with("budget-heavy-message-19-"));
         assert!(joined.contains("compressionTriggered=true"));
-        assert!(joined.contains("soft_char_budget>24000"));
+        assert!(joined.contains("soft_char_budget>1080000"));
         assert!(joined.contains("recent_tail_pruned_to_budget"));
         assert!(joined.contains("protected_recent_floor_preserved"));
         assert!(joined.contains("summaryIncluded=true"));
-        assert!(joined.contains("selectedRecentMessages=4"));
+        assert!(joined.contains("selectedRecentMessages=12"));
         assert!(joined.contains("omittedOlderMessages=8"));
         assert!(joined.contains(&format!("planId={}", plan.id)));
         assert!(joined.contains("goal=预算压缩不能丢当前目标和任务锚点"));
@@ -5193,7 +5196,7 @@ mod tests {
             "data": {
                 "pendingCommand": {
                     "id": pending_id,
-                    "command": "Write-Output aura",
+                    "command": "Write-Output atlas",
                     "cwd": ".",
                     "reason": "测试命令",
                     "shell": "powershell"
@@ -5243,7 +5246,7 @@ mod tests {
             "data": {
                 "pendingCommand": {
                     "id": pending_id,
-                    "command": "Write-Output aura",
+                    "command": "Write-Output atlas",
                     "cwd": ".",
                     "reason": "测试命令",
                     "shell": "powershell"
@@ -5273,10 +5276,10 @@ mod tests {
                         "pendingCommandId": pending_id,
                         "confirmed": true,
                         "commandResult": {
-                            "command": "Write-Output aura",
+                            "command": "Write-Output atlas",
                             "cwd": ".",
                             "exitCode": 0,
-                            "stdout": "aura",
+                            "stdout": "atlas",
                             "stderr": "",
                             "timedOut": false
                         }

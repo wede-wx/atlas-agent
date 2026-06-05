@@ -234,13 +234,13 @@ impl WorkspaceLifecycleRuntime {
             ));
         }
         let hook_path = hooks_dir.join(&hook_name);
-        if hook_path.exists() && !spec.overwrite && !is_aura_managed_hook(&hook_path) {
+        if hook_path.exists() && !spec.overwrite && !is_atlas_managed_hook(&hook_path) {
             return Err(StorageError::Validation(format!(
-                "git hook {hook_name} exists and is not Aura-managed"
+                "git hook {hook_name} exists and is not Atlas-managed"
             )));
         }
         let body = format!(
-            "#!/bin/sh\n# Aura-managed hook. workspace_id={workspace_id}\nset -e\n{command}\n"
+            "#!/bin/sh\n# Atlas-managed hook. workspace_id={workspace_id}\nset -e\n{command}\n"
         );
         std::fs::write(&hook_path, body).map_err(StorageError::Io)?;
         #[cfg(unix)]
@@ -260,14 +260,14 @@ impl WorkspaceLifecycleRuntime {
                 command: Some(command.to_string()),
                 exit_code: Some(0),
                 output_tail: Some(hook_path.to_string_lossy().to_string()),
-                reason: format!("installed Aura-managed git hook {hook_name}"),
+                reason: format!("installed Atlas-managed git hook {hook_name}"),
             })?;
         Ok(WorkspaceGitHookInstallReport {
             workspace_id: workspace_id.to_string(),
             hook_name,
             hook_path: hook_path.to_string_lossy().to_string(),
             installed: true,
-            reason: "Aura-managed git hook installed".to_string(),
+            reason: "Atlas-managed git hook installed".to_string(),
         })
     }
 }
@@ -406,9 +406,9 @@ fn normalize_hook_name(value: &str) -> StorageResult<String> {
     }
 }
 
-fn is_aura_managed_hook(path: &Path) -> bool {
+fn is_atlas_managed_hook(path: &Path) -> bool {
     std::fs::read_to_string(path)
-        .map(|text| text.contains("Aura-managed hook"))
+        .map(|text| text.contains("Atlas-managed hook"))
         .unwrap_or(false)
 }
 
@@ -418,7 +418,7 @@ mod tests {
     use uuid::Uuid;
 
     fn temp_db() -> LocalDb {
-        LocalDb::open(std::env::temp_dir().join(format!("aura_workspace_{}.db", Uuid::new_v4())))
+        LocalDb::open(std::env::temp_dir().join(format!("atlas_workspace_{}.db", Uuid::new_v4())))
             .unwrap()
     }
 
@@ -426,7 +426,7 @@ mod tests {
         let root = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura-{label}-{}", Uuid::new_v4()));
+            .join(format!("atlas-{label}-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         root
     }
@@ -541,7 +541,7 @@ mod tests {
         assert!(snapshot
             .events
             .iter()
-            .any(|event| event.stage == "setup" && event.output_tail.contains("aura-setup-ok")));
+            .any(|event| event.stage == "setup" && event.output_tail.contains("atlas-setup-ok")));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -572,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn git_hook_installer_writes_aura_managed_hook_without_overwriting_user_hook() {
+    fn git_hook_installer_writes_atlas_managed_hook_without_overwriting_user_hook() {
         let db = temp_db();
         let root = temp_root("workspace-hook");
         let hooks = root.join(".git").join("hooks");
@@ -593,7 +593,7 @@ mod tests {
                 "ws-hook",
                 WorkspaceGitHookSpec {
                     hook_name: "pre-commit".to_string(),
-                    command: "echo aura-hook".to_string(),
+                    command: "echo atlas-hook".to_string(),
                     overwrite: false,
                 },
             )
@@ -601,18 +601,18 @@ mod tests {
         assert!(report.installed);
         assert!(std::fs::read_to_string(&report.hook_path)
             .unwrap()
-            .contains("Aura-managed hook"));
+            .contains("Atlas-managed hook"));
         let _ = std::fs::remove_dir_all(root);
     }
 
     fn setup_echo_command() -> String {
         #[cfg(windows)]
         {
-            "echo aura-setup-ok".to_string()
+            "echo atlas-setup-ok".to_string()
         }
         #[cfg(not(windows))]
         {
-            "printf aura-setup-ok".to_string()
+            "printf atlas-setup-ok".to_string()
         }
     }
 }

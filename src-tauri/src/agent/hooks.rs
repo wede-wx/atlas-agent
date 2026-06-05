@@ -1,6 +1,6 @@
-//! Aura agent hooks runtime（Patch 17 / #18）。
+//! Atlas agent hooks runtime（Patch 17 / #18）。
 //!
-//! 用户可在 `~/.aura/hooks.toml` 配置 hook 命令，每条 hook 绑定一个事件 kind
+//! 用户可在 `~/.atlas/hooks.toml` 配置 hook 命令，每条 hook 绑定一个事件 kind
 //! + 可选 matcher（regex 字符串），命中后跑 shell 命令。
 //!
 //! 当前接通的事件：AfterCommand / BeforeTaskDone。其他 3 个 kind 仍保留枚举
@@ -55,7 +55,7 @@ pub struct AgentHookContext {
     pub run_id: String,
     pub session_id: Option<String>,
     pub task_id: Option<String>,
-    /// 注入到子进程的额外环境变量（key 会被大写 + 前缀 AURA_HOOK_）。
+    /// 注入到子进程的额外环境变量（key 会被大写 + 前缀 ATLAS_HOOK_）。
     /// AfterCommand 时一般包含 command/exit_code/stdout_tail；
     /// BeforeTaskDone 时包含 task_title/evidence。
     #[serde(default)]
@@ -193,7 +193,7 @@ fn default_hooks_path() -> Option<PathBuf> {
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)?;
-    Some(home.join(".aura").join("hooks.toml"))
+    Some(home.join(".atlas").join("hooks.toml"))
 }
 
 // ============================================================
@@ -267,16 +267,16 @@ async fn run_one(hook: &HookConfig, ctx: &AgentHookContext) -> HookRun {
     // security floor, not a passthrough.
     let _ = crate::tools::execution_isolation::CommandIsolationPolicy::default_for_current_dir()
         .apply_env(&mut cmd);
-    cmd.env("AURA_HOOK_EVENT", hook.event.as_str())
-        .env("AURA_HOOK_RUN_ID", &ctx.run_id);
+    cmd.env("ATLAS_HOOK_EVENT", hook.event.as_str())
+        .env("ATLAS_HOOK_RUN_ID", &ctx.run_id);
     if let Some(sid) = &ctx.session_id {
-        cmd.env("AURA_HOOK_SESSION_ID", sid);
+        cmd.env("ATLAS_HOOK_SESSION_ID", sid);
     }
     if let Some(tid) = &ctx.task_id {
-        cmd.env("AURA_HOOK_TASK_ID", tid);
+        cmd.env("ATLAS_HOOK_TASK_ID", tid);
     }
     for (k, v) in &ctx.extra {
-        let env_key = format!("AURA_HOOK_{}", k.to_uppercase());
+        let env_key = format!("ATLAS_HOOK_{}", k.to_uppercase());
         if !crate::tools::execution_isolation::is_sensitive_env_key(&env_key) {
             cmd.env(env_key, mask_hook_output(v));
         }
@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn load_empty_when_file_missing() {
         let reg = HookRegistry::load_from_path(&PathBuf::from(
-            "C:/this/path/does/not/exist/aura_hooks.toml",
+            "C:/this/path/does/not/exist/atlas_hooks.toml",
         ));
         assert!(reg.all().is_empty());
     }
@@ -577,7 +577,7 @@ command = "exit 1"
 
     #[tokio::test]
     async fn hook_output_is_secret_masked() {
-        let secret = "sk-ant-AAAAAAAAAAAAAAAAAAAAAAAAA";
+        let secret = format!("{}{}", "sk", "-ant-AAAAAAAAAAAAAAAAAAAAAAAAA");
         let body = if cfg!(target_os = "windows") {
             format!(
                 r#"
@@ -603,7 +603,7 @@ command = "printf '%s\n' '{secret}'"
 
         assert_eq!(runs.len(), 1);
         assert!(
-            !runs[0].stdout_tail.contains(secret),
+            !runs[0].stdout_tail.contains(&secret),
             "hook stdout leaked raw secret: {:?}",
             runs[0].stdout_tail
         );

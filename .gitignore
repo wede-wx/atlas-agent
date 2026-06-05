@@ -8,6 +8,11 @@ target/
 coverage/
 out/
 output/
+runtime-data/
+sessions/
+artifacts/
+uploads/
+downloads/
 
 # Local runtime data
 .env
@@ -18,10 +23,14 @@ output/
 *.log
 tmp/
 temp/
+screenshots/
+playwright-report/
+test-results/
 
 # Tool caches
 .playwright-cli/
 .cache/
+gen/
 
 # OS/editor noise
 .DS_Store

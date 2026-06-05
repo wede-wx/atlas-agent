@@ -400,7 +400,7 @@ mod tests {
     use uuid::Uuid;
 
     fn temp_db() -> LocalDb {
-        let path = std::env::temp_dir().join(format!("aura_graph_{}.db", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("atlas_graph_{}.db", Uuid::new_v4()));
         LocalDb::open(path).unwrap()
     }
 

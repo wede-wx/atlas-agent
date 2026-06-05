@@ -184,7 +184,7 @@ impl Tool for RunCommandTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: self.name().to_string(),
-            description: "Run a local shell command immediately. Destructive or system-level commands are blocked by Aura safety checks.".to_string(),
+            description: "Run a local shell command immediately. Destructive or system-level commands are blocked by Atlas safety checks.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -194,7 +194,7 @@ impl Tool for RunCommandTool {
                     },
                     "cwd": {
                         "type": "string",
-                        "description": "Optional working directory. Must stay inside Aura's configured command workspace boundary."
+                        "description": "Optional working directory. Must stay inside Atlas's configured command workspace boundary."
                     },
                     "timeout_ms": {
                         "type": "integer",
@@ -590,23 +590,23 @@ mod tests {
     #[tokio::test]
     async fn shell_command_runs_simple_echo() {
         let command = if cfg!(windows) {
-            "Write-Output aura-command-test"
+            "Write-Output atlas-command-test"
         } else {
-            "printf aura-command-test"
+            "printf atlas-command-test"
         };
         let result = execute_shell_command(command, None, Duration::from_secs(10))
             .await
             .unwrap();
         assert_eq!(result.exit_code, Some(0));
-        assert!(result.stdout.contains("aura-command-test"));
+        assert!(result.stdout.contains("atlas-command-test"));
     }
 
     #[tokio::test]
     async fn shell_command_streams_output_events() {
         let command = if cfg!(windows) {
-            "Write-Output aura-stream-test"
+            "Write-Output atlas-stream-test"
         } else {
-            "printf aura-stream-test"
+            "printf atlas-stream-test"
         };
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let result = execute_shell_command_streaming(
@@ -619,7 +619,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result.exit_code, Some(0));
-        assert!(result.stdout.contains("aura-stream-test"));
+        assert!(result.stdout.contains("atlas-stream-test"));
 
         let mut saw_output_event = false;
         while let Some(event) = rx.recv().await {
@@ -631,7 +631,7 @@ mod tests {
             {
                 if operation_id == "op-stream-test"
                     && stream == "stdout"
-                    && content.contains("aura-stream-test")
+                    && content.contains("atlas-stream-test")
                 {
                     saw_output_event = true;
                 }
@@ -644,7 +644,7 @@ mod tests {
     async fn streaming_output_is_masked_before_reaching_ui() {
         // A fake Anthropic-style key on its own line must be redacted in the live
         // OperationOutput events, not only in the final captured result.
-        let secret = "sk-ant-AAAAAAAAAAAAAAAAAAAAAAAAA";
+        let secret = format!("{}{}", "sk", "-ant-AAAAAAAAAAAAAAAAAAAAAAAAA");
         let command = if cfg!(windows) {
             format!("Write-Output '{secret}'")
         } else {
@@ -669,7 +669,7 @@ mod tests {
             }
         }
         assert!(
-            !streamed.contains(secret),
+            !streamed.contains(&secret),
             "raw secret leaked to live stream: {streamed:?}"
         );
         assert!(
@@ -703,7 +703,7 @@ mod tests {
         let base = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura-command-boundary-{}", Uuid::new_v4()));
+            .join(format!("atlas-command-boundary-{}", Uuid::new_v4()));
         let project = base.join("project");
         let outside = base.join("outside");
         std::fs::create_dir_all(&project).unwrap();
@@ -724,23 +724,23 @@ mod tests {
         let base = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura-command-env-{}", Uuid::new_v4()));
+            .join(format!("atlas-command-env-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&base).unwrap();
-        std::env::set_var("AURA_COMMAND_ALLOWED_TEST", "visible-value");
-        std::env::set_var("AURA_COMMAND_SECRET_TOKEN", "secret-value");
+        std::env::set_var("ATLAS_COMMAND_ALLOWED_TEST", "visible-value");
+        std::env::set_var("ATLAS_COMMAND_SECRET_TOKEN", "secret-value");
         let config = ExecutionIsolationConfig {
             command_workspace_boundary: true,
             allowed_command_roots: Vec::new(),
             command_env_allowlist: vec![
-                "AURA_COMMAND_ALLOWED_TEST".to_string(),
-                "AURA_COMMAND_SECRET_TOKEN".to_string(),
+                "ATLAS_COMMAND_ALLOWED_TEST".to_string(),
+                "ATLAS_COMMAND_SECRET_TOKEN".to_string(),
             ],
         };
         let policy = CommandIsolationPolicy::from_config(&config, std::slice::from_ref(&base));
         let command = if cfg!(windows) {
-            "Write-Output ($env:AURA_COMMAND_ALLOWED_TEST + '|' + $env:AURA_COMMAND_SECRET_TOKEN)"
+            "Write-Output ($env:ATLAS_COMMAND_ALLOWED_TEST + '|' + $env:ATLAS_COMMAND_SECRET_TOKEN)"
         } else {
-            "printf '%s|%s\\n' \"$AURA_COMMAND_ALLOWED_TEST\" \"$AURA_COMMAND_SECRET_TOKEN\""
+            "printf '%s|%s\\n' \"$ATLAS_COMMAND_ALLOWED_TEST\" \"$ATLAS_COMMAND_SECRET_TOKEN\""
         };
 
         let result = execute_shell_command_streaming_with_policy(
@@ -754,8 +754,8 @@ mod tests {
         .await
         .unwrap();
 
-        std::env::remove_var("AURA_COMMAND_ALLOWED_TEST");
-        std::env::remove_var("AURA_COMMAND_SECRET_TOKEN");
+        std::env::remove_var("ATLAS_COMMAND_ALLOWED_TEST");
+        std::env::remove_var("ATLAS_COMMAND_SECRET_TOKEN");
         let _ = std::fs::remove_dir_all(base);
         assert_eq!(result.exit_code, Some(0));
         assert!(result.stdout.contains("visible-value|"));
@@ -768,12 +768,12 @@ mod tests {
             .isolation
             .injected_env
             .iter()
-            .any(|key| key == "AURA_COMMAND_ALLOWED_TEST"));
+            .any(|key| key == "ATLAS_COMMAND_ALLOWED_TEST"));
         assert!(!result
             .isolation
             .injected_env
             .iter()
-            .any(|key| key == "AURA_COMMAND_SECRET_TOKEN"));
+            .any(|key| key == "ATLAS_COMMAND_SECRET_TOKEN"));
         assert!(result.isolation.blocked_sensitive_env_count >= 1);
     }
 

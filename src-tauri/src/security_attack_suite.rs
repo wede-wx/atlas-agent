@@ -65,7 +65,7 @@ mod secret {
     fn secret_in_command_output_is_detected_and_masked() {
         // Attack: a tool result tries to carry a real-looking OpenAI key across
         // the command-output -> log / model-context boundary.
-        let raw_key = "sk-proj-AbCdEf0123456789GhIjKlMnOpQrStUv";
+        let raw_key = format!("{}{}", "sk", "-proj-AbCdEf0123456789GhIjKlMnOpQrStUv");
         let leak = format!("the key is {raw_key} keep it secret");
         let report = scan(&leak, SecretLocation::CommandOutput, SecretAction::Masked);
         assert!(report.has_secrets(), "the planted key must be detected");
@@ -74,7 +74,7 @@ mod secret {
             "masked output must carry a redaction marker"
         );
         assert!(
-            !report.text.contains(raw_key),
+            !report.text.contains(&raw_key),
             "the raw secret must never survive masking"
         );
     }

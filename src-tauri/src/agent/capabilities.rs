@@ -711,8 +711,10 @@ mod tests {
     use uuid::Uuid;
 
     fn temp_db() -> LocalDb {
-        LocalDb::open(std::env::temp_dir().join(format!("aura_capabilities_{}.db", Uuid::new_v4())))
-            .unwrap()
+        LocalDb::open(
+            std::env::temp_dir().join(format!("atlas_capabilities_{}.db", Uuid::new_v4())),
+        )
+        .unwrap()
     }
 
     #[test]

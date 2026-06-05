@@ -601,7 +601,7 @@ mod tests {
         let dir = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura_snapshot_{}", std::process::id()));
+            .join(format!("atlas_snapshot_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join("node_modules")).unwrap();

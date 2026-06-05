@@ -745,7 +745,7 @@ mod tests {
     use uuid::Uuid;
 
     fn setup_db() -> (std::path::PathBuf, LocalDb, String) {
-        let path = std::env::temp_dir().join(format!("aura_plan_tasks_{}.db", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("atlas_plan_tasks_{}.db", Uuid::new_v4()));
         let db = LocalDb::open(path.clone()).expect("open db");
         let session = db.create_session("plan-tasks-test").expect("session");
         (path, db, session.id)
@@ -983,7 +983,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_session_returns_tool_error() {
-        let path = std::env::temp_dir().join(format!("aura_plan_tasks_{}.db", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("atlas_plan_tasks_{}.db", Uuid::new_v4()));
         let db = LocalDb::open(path).expect("open db");
         let tool = CreatePlanTaskTool::new(db, None);
         let err = tool

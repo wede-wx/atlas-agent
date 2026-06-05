@@ -7,7 +7,7 @@
 //! Tiered storage:
 //! - file does not exist before write → record a "missing" marker (reset deletes the file)
 //! - size ≤ INLINE_LIMIT_BYTES + valid UTF-8 → inline into DB `before_content`
-//! - otherwise → write blob to `~/.aura/checkpoints/<run_id_or_session>/<task_id>/<hash>.before`
+//! - otherwise → write blob to `~/.atlas/checkpoints/<run_id_or_session>/<task_id>/<hash>.before`
 //!   and store the blob path in DB
 //! - size > HARD_LIMIT_BYTES → reject the write entirely (recoverable error)
 
@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::agent::{AgentError, ToolResult, ToolSchema};
-use crate::storage::{aura_home, FileCheckpointRecord, LocalDb};
+use crate::storage::{atlas_home, FileCheckpointRecord, LocalDb};
 use crate::tools::{Tool, ToolCapability, ToolMetadata, ToolSafetyLevel};
 
 pub const INLINE_LIMIT_BYTES: u64 = 64 * 1024;
@@ -95,9 +95,9 @@ pub enum CheckpointOutcome {
     Skipped(CheckpointSkipReason),
 }
 
-/// Root for blob storage. `~/.aura/checkpoints` by default; overridable via AURA_HOME.
+/// Root for blob storage. `~/.atlas/checkpoints` by default; overridable via ATLAS_HOME.
 pub fn checkpoints_root() -> Result<PathBuf, CheckpointError> {
-    aura_home()
+    atlas_home()
         .map(|p| p.join("checkpoints"))
         .map_err(|e| CheckpointError::Io(e.to_string()))
 }
@@ -1102,7 +1102,7 @@ mod tests {
     use uuid::Uuid;
 
     fn temp_db() -> LocalDb {
-        let path = std::env::temp_dir().join(format!("aura_ckpt_test_{}.db", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("atlas_ckpt_test_{}.db", Uuid::new_v4()));
         LocalDb::open(path).unwrap()
     }
 
@@ -1188,7 +1188,7 @@ mod tests {
     fn capture_inline_for_small_existing_file() {
         let db = temp_db();
         let (sid, _tid) = setup_session_with_active_task(&db);
-        let target = std::env::temp_dir().join(format!("aura_ckpt_small_{}.txt", Uuid::new_v4()));
+        let target = std::env::temp_dir().join(format!("atlas_ckpt_small_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, b"hello").unwrap();
 
         let outcome = capture_before_write(&db, Some(&sid), &target).unwrap();
@@ -1211,7 +1211,8 @@ mod tests {
     fn capture_missing_marker_when_file_does_not_exist() {
         let db = temp_db();
         let (sid, _tid) = setup_session_with_active_task(&db);
-        let target = std::env::temp_dir().join(format!("aura_ckpt_missing_{}.txt", Uuid::new_v4()));
+        let target =
+            std::env::temp_dir().join(format!("atlas_ckpt_missing_{}.txt", Uuid::new_v4()));
         // ensure non-existent
         let _ = std::fs::remove_file(&target);
 
@@ -1231,7 +1232,7 @@ mod tests {
     fn capture_rejects_over_hard_limit() {
         let db = temp_db();
         let (sid, _tid) = setup_session_with_active_task(&db);
-        let target = std::env::temp_dir().join(format!("aura_ckpt_huge_{}.bin", Uuid::new_v4()));
+        let target = std::env::temp_dir().join(format!("atlas_ckpt_huge_{}.bin", Uuid::new_v4()));
         // 6 MB > HARD_LIMIT_BYTES
         let big = vec![0u8; (HARD_LIMIT_BYTES + 1024) as usize];
         std::fs::write(&target, &big).unwrap();
@@ -1245,7 +1246,7 @@ mod tests {
     fn capture_skips_when_no_active_task() {
         let db = temp_db();
         let session = db.create_session("ckpt-noactive").unwrap();
-        let target = std::env::temp_dir().join(format!("aura_ckpt_noact_{}.txt", Uuid::new_v4()));
+        let target = std::env::temp_dir().join(format!("atlas_ckpt_noact_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, b"x").unwrap();
         let outcome = capture_before_write(&db, Some(&session.id), &target).unwrap();
         assert!(matches!(
@@ -1262,7 +1263,7 @@ mod tests {
 
         // Existing file: capture, then mutate, then reset should restore.
         let kept =
-            std::env::temp_dir().join(format!("aura_ckpt_reset_kept_{}.txt", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atlas_ckpt_reset_kept_{}.txt", Uuid::new_v4()));
         std::fs::write(&kept, b"original").unwrap();
         let kept_checkpoint = capture_before_write(&db, Some(&sid), &kept).unwrap();
         std::fs::write(&kept, b"mutated").unwrap();
@@ -1270,7 +1271,7 @@ mod tests {
 
         // New file: capture before (does not exist), then create, reset should delete.
         let new_file =
-            std::env::temp_dir().join(format!("aura_ckpt_reset_new_{}.txt", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atlas_ckpt_reset_new_{}.txt", Uuid::new_v4()));
         let _ = std::fs::remove_file(&new_file);
         let new_checkpoint = capture_before_write(&db, Some(&sid), &new_file).unwrap();
         std::fs::write(&new_file, b"created-by-task").unwrap();
@@ -1291,7 +1292,7 @@ mod tests {
         let db = temp_db();
         let (sid, tid) = setup_session_with_active_task(&db);
         let target =
-            std::env::temp_dir().join(format!("aura_ckpt_after_content_{}.txt", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atlas_ckpt_after_content_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, b"before\n").unwrap();
 
         let checkpoint = capture_before_write(&db, Some(&sid), &target).unwrap();
@@ -1311,7 +1312,7 @@ mod tests {
     fn run_diff_uses_checkpoint_snapshots_not_current_file() {
         let db = temp_db();
         let (sid, _tid, run_id) = setup_session_with_active_run_task(&db);
-        let target = std::env::temp_dir().join(format!("aura_ckpt_diff_{}.txt", Uuid::new_v4()));
+        let target = std::env::temp_dir().join(format!("atlas_ckpt_diff_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, "one\ntwo\n").unwrap();
 
         let checkpoint = capture_before_write(&db, Some(&sid), &target).unwrap();
@@ -1342,7 +1343,7 @@ mod tests {
         let db = temp_db();
         let (sid, _tid, run_id) = setup_session_with_active_run_task(&db);
         let target =
-            std::env::temp_dir().join(format!("aura_ckpt_diff_legacy_{}.txt", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atlas_ckpt_diff_legacy_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, "before\n").unwrap();
 
         let _checkpoint = capture_before_write(&db, Some(&sid), &target).unwrap();
@@ -1365,7 +1366,7 @@ mod tests {
         let db = temp_db();
         let (sid, tid) = setup_session_with_active_task(&db);
         let target =
-            std::env::temp_dir().join(format!("aura_ckpt_conflict_{}.txt", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atlas_ckpt_conflict_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, b"original").unwrap();
 
         let checkpoint = capture_before_write(&db, Some(&sid), &target).unwrap();
@@ -1394,7 +1395,7 @@ mod tests {
         let db = temp_db();
         let (sid, tid) = setup_session_with_active_task(&db);
         let target =
-            std::env::temp_dir().join(format!("aura_ckpt_repeated_{}.txt", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("atlas_ckpt_repeated_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, b"original").unwrap();
 
         let first = capture_before_write(&db, Some(&sid), &target).unwrap();
@@ -1425,7 +1426,7 @@ mod tests {
     fn reset_task_treats_missing_after_hash_as_conflict_until_forced() {
         let db = temp_db();
         let (sid, tid) = setup_session_with_active_task(&db);
-        let target = std::env::temp_dir().join(format!("aura_ckpt_legacy_{}.txt", Uuid::new_v4()));
+        let target = std::env::temp_dir().join(format!("atlas_ckpt_legacy_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, b"original").unwrap();
 
         let _checkpoint = capture_before_write(&db, Some(&sid), &target).unwrap();
@@ -1451,7 +1452,7 @@ mod tests {
     fn reset_task_force_overwrites_conflict_when_requested() {
         let db = temp_db();
         let (sid, tid) = setup_session_with_active_task(&db);
-        let target = std::env::temp_dir().join(format!("aura_ckpt_force_{}.txt", Uuid::new_v4()));
+        let target = std::env::temp_dir().join(format!("atlas_ckpt_force_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, b"original").unwrap();
 
         let checkpoint = capture_before_write(&db, Some(&sid), &target).unwrap();
@@ -1480,8 +1481,10 @@ mod tests {
     fn reset_task_detects_created_file_conflict_without_deleting() {
         let db = temp_db();
         let (sid, tid) = setup_session_with_active_task(&db);
-        let target =
-            std::env::temp_dir().join(format!("aura_ckpt_created_conflict_{}.txt", Uuid::new_v4()));
+        let target = std::env::temp_dir().join(format!(
+            "atlas_ckpt_created_conflict_{}.txt",
+            Uuid::new_v4()
+        ));
         let _ = std::fs::remove_file(&target);
 
         let checkpoint = capture_before_write(&db, Some(&sid), &target).unwrap();
@@ -1506,7 +1509,7 @@ mod tests {
         // File > INLINE_LIMIT but ≤ HARD_LIMIT must go to external blob storage.
         let db = temp_db();
         let (sid, tid) = setup_session_with_active_task(&db);
-        let target = std::env::temp_dir().join(format!("aura_ckpt_blob_{}.bin", Uuid::new_v4()));
+        let target = std::env::temp_dir().join(format!("atlas_ckpt_blob_{}.bin", Uuid::new_v4()));
         let payload = vec![0xAAu8; (INLINE_LIMIT_BYTES + 1024) as usize];
         std::fs::write(&target, &payload).unwrap();
 
@@ -1544,7 +1547,7 @@ mod tests {
     fn purge_for_task_removes_rows_and_blobs() {
         let db = temp_db();
         let (sid, tid) = setup_session_with_active_task(&db);
-        let target = std::env::temp_dir().join(format!("aura_ckpt_purge_{}.txt", Uuid::new_v4()));
+        let target = std::env::temp_dir().join(format!("atlas_ckpt_purge_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, b"to-be-purged").unwrap();
         let _ = capture_before_write(&db, Some(&sid), &target).unwrap();
         assert_eq!(db.list_file_checkpoints(&tid).unwrap().len(), 1);

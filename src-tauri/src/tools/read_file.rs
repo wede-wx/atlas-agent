@@ -145,7 +145,8 @@ mod tests {
     #[tokio::test]
     async fn test_read_rejects_existing_file_outside_allowed_scope() {
         let tool = ReadFileTool::default();
-        let temp = std::env::temp_dir().join(format!("aura_read_scope_{}.txt", std::process::id()));
+        let temp =
+            std::env::temp_dir().join(format!("atlas_read_scope_{}.txt", std::process::id()));
         std::fs::write(&temp, "secret").unwrap();
         let result = tool
             .execute(serde_json::json!({ "path": temp.to_string_lossy() }))
@@ -163,7 +164,7 @@ mod tests {
         let dir = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura_read_trunc_{}", std::process::id()));
+            .join(format!("atlas_read_trunc_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("big.txt");
         let body = format!("HEAD_MARKER\n{}\nTAIL_MARKER", "x".repeat(50_000));

@@ -1151,7 +1151,7 @@ pub struct FileWritePreview {
 
 impl LocalDb {
     pub fn open_default() -> StorageResult<Self> {
-        Self::open(aura_home()?.join("aura.db"))
+        Self::open(atlas_home()?.join("atlas.db"))
     }
 
     pub fn open(path: PathBuf) -> StorageResult<Self> {
@@ -2951,7 +2951,7 @@ impl LocalDb {
             .unwrap_or(3);
         let ati_profile = build_ati_profile(&scores);
         let profile = json!({
-            "personalityType": ati_profile.get("code").and_then(|value| value.as_str()).unwrap_or("AURA-LOCAL"),
+            "personalityType": ati_profile.get("code").and_then(|value| value.as_str()).unwrap_or("ATLAS-LOCAL"),
             "atiProfile": ati_profile,
             "dimensionScores": scores,
             "replyStyle": if verbosity <= 2 { "minimal" } else if support >= 4 { "gentle" } else { "professional" },
@@ -2978,7 +2978,7 @@ impl LocalDb {
         validate_write_target(&path)?;
         if content.len() > 1_000_000 {
             return Err(StorageError::Validation(
-                "文件内容超过 1MB，Aura 不会一次性写入这么大的文本。".to_string(),
+                "文件内容超过 1MB，Atlas 不会一次性写入这么大的文本。".to_string(),
             ));
         }
         let existing_text = if path.exists() {
@@ -3282,7 +3282,7 @@ impl LocalDb {
             let role = if message.role == "user" {
                 "用户"
             } else {
-                "Aura"
+                "Atlas"
             };
             lines.push(format!("{role}: {}", compact_text(&message.content, 140)));
         }
@@ -3355,7 +3355,7 @@ impl LocalDb {
             String::new(),
             format!("- 会话：{}", included.len()),
             format!(
-                "- 消息：{}（用户 {} / Aura {}）",
+                "- 消息：{}（用户 {} / Atlas {}）",
                 message_count, user_message_count, assistant_message_count
             ),
         ];
@@ -7824,9 +7824,9 @@ impl LocalDb {
 
     pub fn write_export_file(&self) -> StorageResult<PathBuf> {
         let export = self.export_local_data()?;
-        let dir = aura_home()?.join("exports");
+        let dir = atlas_home()?.join("exports");
         std::fs::create_dir_all(&dir)?;
-        let filename = format!("aura-export-{}.json", Utc::now().format("%Y%m%d-%H%M%S"));
+        let filename = format!("atlas-export-{}.json", Utc::now().format("%Y%m%d-%H%M%S"));
         let path = dir.join(filename);
         std::fs::write(&path, serde_json::to_string_pretty(&export)?)?;
         Ok(path)
@@ -8026,8 +8026,8 @@ fn redact_secret_json(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
-pub fn aura_home() -> StorageResult<PathBuf> {
-    if let Ok(path) = std::env::var("AURA_HOME") {
+pub fn atlas_home() -> StorageResult<PathBuf> {
+    if let Ok(path) = std::env::var("ATLAS_HOME") {
         let path = path.trim();
         if !path.is_empty() {
             return Ok(PathBuf::from(path));
@@ -8035,7 +8035,7 @@ pub fn aura_home() -> StorageResult<PathBuf> {
     }
     Ok(dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".aura"))
+        .join(".atlas"))
 }
 
 pub fn default_profile_json() -> serde_json::Value {
@@ -8600,7 +8600,7 @@ fn validate_write_target(path: &Path) -> StorageResult<()> {
     ];
     if blocked.iter().any(|item| path_text.contains(item)) {
         return Err(StorageError::Validation(
-            "目标路径属于系统、密钥或敏感应用目录，Aura 不会写入。".to_string(),
+            "目标路径属于系统、密钥或敏感应用目录，Atlas 不会写入。".to_string(),
         ));
     }
     Ok(())
@@ -9328,9 +9328,9 @@ fn looks_like_question(value: &str) -> bool {
 }
 
 fn export_profile_markdown(profile: &serde_json::Value) -> StorageResult<()> {
-    let path = aura_home()?.join("profile.md");
+    let path = atlas_home()?.join("profile.md");
     let content = format!(
-        "# Aura Profile\n\n```json\n{}\n```\n",
+        "# Atlas Profile\n\n```json\n{}\n```\n",
         serde_json::to_string_pretty(profile)?
     );
     std::fs::write(path, content)?;
@@ -9398,7 +9398,7 @@ fn axis_atom(
         low_label
     };
     let description = if balanced {
-        "偏好较平衡，Aura 应根据上下文动态调整。"
+        "偏好较平衡，Atlas 应根据上下文动态调整。"
     } else if high {
         high_desc
     } else {
@@ -9425,8 +9425,8 @@ fn build_ati_profile(scores: &serde_json::Value) -> serde_json::Value {
             "C",
             "独处沉浸",
             "协作交互",
-            "Aura 应减少不必要打扰，优先给清楚、低噪声的支持。",
-            "Aura 可以更多使用对话、交换和轻量提醒来推进想法。",
+            "Atlas 应减少不必要打扰，优先给清楚、低噪声的支持。",
+            "Atlas 可以更多使用对话、交换和轻量提醒来推进想法。",
         ),
         axis_atom(
             scores,
@@ -9436,8 +9436,8 @@ fn build_ati_profile(scores: &serde_json::Value) -> serde_json::Value {
             "V",
             "事实细节",
             "愿景可能",
-            "Aura 应优先给事实、路径、数据和可验证依据。",
-            "Aura 可以先给结构、趋势、可能性和概念地图。",
+            "Atlas 应优先给事实、路径、数据和可验证依据。",
+            "Atlas 可以先给结构、趋势、可能性和概念地图。",
         ),
         axis_atom(
             scores,
@@ -9447,8 +9447,8 @@ fn build_ati_profile(scores: &serde_json::Value) -> serde_json::Value {
             "E",
             "逻辑效率",
             "共情价值",
-            "Aura 应突出利弊、风险、成本和执行效率。",
-            "Aura 应同时照顾感受、沟通方式和关系影响。",
+            "Atlas 应突出利弊、风险、成本和执行效率。",
+            "Atlas 应同时照顾感受、沟通方式和关系影响。",
         ),
         axis_atom(
             scores,
@@ -9458,8 +9458,8 @@ fn build_ati_profile(scores: &serde_json::Value) -> serde_json::Value {
             "F",
             "秩序计划",
             "灵活流动",
-            "Aura 应给明确计划、检查点和收尾动作。",
-            "Aura 应保留弹性，把计划作为可以调整的草稿。",
+            "Atlas 应给明确计划、检查点和收尾动作。",
+            "Atlas 应保留弹性，把计划作为可以调整的草稿。",
         ),
     ];
 
@@ -9500,7 +9500,7 @@ fn build_ati_profile(scores: &serde_json::Value) -> serde_json::Value {
     json!({
         "code": format!("ATI-{code}"),
         "summary": format!(
-            "当前画像偏向：{energy}、{perception}、{decision}、{execution}。这只用于调整 Aura 的回应方式，不是心理诊断。"
+            "当前画像偏向：{energy}、{perception}、{decision}、{execution}。这只用于调整 Atlas 的回应方式，不是心理诊断。"
         ),
         "axes": serde_json::Value::Object(axes_json),
     })
@@ -9568,7 +9568,7 @@ mod tests {
     use super::*;
 
     fn temp_db() -> LocalDb {
-        let path = std::env::temp_dir().join(format!("aura_test_{}.db", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("atlas_test_{}.db", Uuid::new_v4()));
         LocalDb::open(path).unwrap()
     }
 
@@ -10554,23 +10554,23 @@ mod tests {
     }
 
     #[test]
-    fn aura_home_env_redirects_default_local_db() {
+    fn atlas_home_env_redirects_default_local_db() {
         let _guard = crate::TEST_ENV_LOCK.blocking_lock();
-        let dir = std::env::temp_dir().join(format!("aura_storage_home_{}", Uuid::new_v4()));
-        std::env::set_var("AURA_HOME", &dir);
+        let dir = std::env::temp_dir().join(format!("atlas_storage_home_{}", Uuid::new_v4()));
+        std::env::set_var("ATLAS_HOME", &dir);
 
-        assert_eq!(aura_home().unwrap(), dir);
+        assert_eq!(atlas_home().unwrap(), dir);
         let db = LocalDb::open_default().unwrap();
-        assert_eq!(db.path(), dir.join("aura.db"));
+        assert_eq!(db.path(), dir.join("atlas.db"));
         assert!(db.path().exists());
 
-        std::env::remove_var("AURA_HOME");
+        std::env::remove_var("ATLAS_HOME");
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn init_migrates_legacy_project_and_message_columns() {
-        let path = std::env::temp_dir().join(format!("aura_legacy_{}.db", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("atlas_legacy_{}.db", Uuid::new_v4()));
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
@@ -10861,7 +10861,7 @@ mod tests {
     #[test]
     fn project_sessions_keep_project_context() {
         let db = temp_db();
-        let dir = std::env::temp_dir().join(format!("aura_project_{}", Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("atlas_project_{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let project = db
             .upsert_project("桌面项目", Some(&dir.to_string_lossy()), "folder")
@@ -11342,7 +11342,7 @@ mod tests {
             .unwrap();
         let pending = db
             .prepare_command(
-                "Write-Output aura".to_string(),
+                "Write-Output atlas".to_string(),
                 ".".to_string(),
                 "测试命令".to_string(),
                 "powershell".to_string(),

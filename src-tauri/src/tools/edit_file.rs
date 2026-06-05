@@ -238,7 +238,7 @@ mod tests {
     use uuid::Uuid;
 
     fn temp_db() -> LocalDb {
-        let path = std::env::temp_dir().join(format!("aura_edit_file_test_{}.db", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("atlas_edit_file_test_{}.db", Uuid::new_v4()));
         LocalDb::open(path).unwrap()
     }
 
@@ -247,7 +247,7 @@ mod tests {
         let target = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura_edit_tool_{}.txt", Uuid::new_v4()));
+            .join(format!("atlas_edit_tool_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, "one\r\ntwo\r\nthree\r\n").unwrap();
         let tool = EditFileTool::new(temp_db());
 
@@ -278,7 +278,7 @@ mod tests {
         let target = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura_edit_tool_cr_{}.txt", Uuid::new_v4()));
+            .join(format!("atlas_edit_tool_cr_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, "one\rtwo\rthree\r").unwrap();
         let tool = EditFileTool::new(temp_db());
 
@@ -309,7 +309,7 @@ mod tests {
         let target = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("aura_edit_tool_delete_{}.txt", Uuid::new_v4()));
+            .join(format!("atlas_edit_tool_delete_{}.txt", Uuid::new_v4()));
         std::fs::write(&target, "one\ntwo\nthree\n").unwrap();
         let tool = EditFileTool::new(temp_db());
 

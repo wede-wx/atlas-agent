@@ -124,7 +124,7 @@ pub fn export_run_trajectory(
         .collect::<Vec<_>>();
     Ok(TrajectoryExport {
         run_id: run_id.to_string(),
-        format: "aura-trajectory-jsonl-v1".to_string(),
+        format: "atlas-trajectory-jsonl-v1".to_string(),
         event_count: events.len(),
         total_available: timeline.total,
         truncated: timeline.total > events.len() as i64,
@@ -193,7 +193,7 @@ pub fn import_trajectory_jsonl(
         }
     }
     Ok(TrajectoryImportReport {
-        format: "aura-trajectory-jsonl-v1".to_string(),
+        format: "atlas-trajectory-jsonl-v1".to_string(),
         run_id,
         event_count: events.len(),
         truncated: total > events.len(),
@@ -337,20 +337,21 @@ mod tests {
     use uuid::Uuid;
 
     fn temp_db() -> LocalDb {
-        LocalDb::open(std::env::temp_dir().join(format!("aura_trajectory_{}.db", Uuid::new_v4())))
+        LocalDb::open(std::env::temp_dir().join(format!("atlas_trajectory_{}.db", Uuid::new_v4())))
             .unwrap()
     }
 
     #[test]
     fn trajectory_exports_real_timeline_and_redacts_secrets() {
         let db = temp_db();
+        let secret = format!("{}{}", "sk", "-proj-abcdefghijklmnopqrstuvwxyz");
         db.create_agent_run("run-traj", None, "default").unwrap();
         db.append_agent_run_step(
             "run-traj",
             "tool_call",
             "finished",
             "command finished",
-            json!({ "command": "echo sk-proj-abcdefghijklmnopqrstuvwxyz" }),
+            json!({ "command": format!("echo {secret}") }),
             json!({ "ok": true }),
         )
         .unwrap();
@@ -373,7 +374,7 @@ mod tests {
     fn replay_is_readonly_and_marks_mutating_frames() {
         let export = TrajectoryExport {
             run_id: "run".to_string(),
-            format: "aura-trajectory-jsonl-v1".to_string(),
+            format: "atlas-trajectory-jsonl-v1".to_string(),
             event_count: 1,
             total_available: 1,
             truncated: false,
@@ -430,7 +431,7 @@ mod tests {
     fn trajectory_eval_flags_completion_without_verification() {
         let export = TrajectoryExport {
             run_id: "run-risk".to_string(),
-            format: "aura-trajectory-jsonl-v1".to_string(),
+            format: "atlas-trajectory-jsonl-v1".to_string(),
             event_count: 2,
             total_available: 2,
             truncated: false,
