@@ -16,6 +16,7 @@
 
 pub mod completion_gate;
 pub mod contract_gate;
+pub mod glue;
 pub mod goal_contract;
 pub mod impact_evidence;
 pub mod verifier;

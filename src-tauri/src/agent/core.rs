@@ -146,6 +146,7 @@ pub struct Agent {
     runtime_config: AgentRuntimeConfig,
     tools_enabled: bool,
     tool_access_policy: ToolAccessPolicy,
+    atlas: std::sync::Mutex<crate::agent::atlas_harness::AtlasHarness>,
     tool_audit_sink: Option<AgentToolAuditSink>,
     usage_sink: Option<AgentUsageSink>,
     run_id_override: Option<String>,
@@ -169,6 +170,7 @@ impl Agent {
             runtime_config: AgentRuntimeConfig::default(),
             tools_enabled: true,
             tool_access_policy: ToolAccessPolicy::FullAccess,
+            atlas: std::sync::Mutex::new(crate::agent::atlas_harness::AtlasHarness::new()),
             tool_audit_sink: None,
             usage_sink: None,
             run_id_override: None,
@@ -730,6 +732,25 @@ impl Agent {
 
             if let Some(content) = &response_content {
                 messages.push(Message::plain(Role::Assistant, content.clone()));
+
+                // ── Atlas：尚未冻结契约时，从本次 assistant 文本抽取并冻结 ──
+                let need_contract = self
+                    .atlas
+                    .lock()
+                    .expect("atlas mutex poisoned")
+                    .contract()
+                    .is_none();
+                if need_contract {
+                    use crate::agent::atlas_harness::glue::extract_contract_block;
+                    if let Some(block) = extract_contract_block(content) {
+                        let _ = self
+                            .atlas
+                            .lock()
+                            .expect("atlas mutex poisoned")
+                            .install_contract_from_skill(block);
+                        // 可选：把契约持久化到 storage，便于会话重入
+                    }
+                }
             }
 
             if !rejected_unknown_tools.is_empty() && normalized_tool_calls.is_empty() {
@@ -1221,6 +1242,90 @@ impl Agent {
             }
         }
 
+        // ===== Atlas 目标保真闸（在权限闸之后、执行之前）=====
+        {
+            use crate::agent::atlas_harness::glue::proposed_action_from_tool_call;
+            use crate::agent::atlas_harness::HarnessGate;
+
+            let action = proposed_action_from_tool_call(&tool_call.name, &tool_call.arguments);
+            // 锁只在这一行持有；gate_action 返回的是自有值，guard 随即释放。
+            let gate = self
+                .atlas
+                .lock()
+                .expect("atlas mutex poisoned")
+                .gate_action(&action);
+
+            match gate {
+                HarnessGate::Allow => { /* 与契约不冲突，继续往下执行 */ }
+
+                HarnessGate::Block { reason, violations } => {
+                    let detail = violations
+                        .iter()
+                        .map(|v| format!("[{}] {}", v.item_id, v.why))
+                        .collect::<Vec<_>>()
+                        .join("；");
+                    self.emit_tool_audit(
+                        run_id,
+                        iteration,
+                        tool_call,
+                        AgentToolAuditStatus::Blocked,
+                        "atlas_contract_block",
+                    );
+                    emit_blocked_operation(event_tx, tool_call, reason.clone());
+                    return ToolResult::error(
+                        format!("Atlas 拦截：{reason}（{detail}）"),
+                        vec![
+                            "这违反了已冻结的目标契约里的硬性项".to_string(),
+                            "不要绕过：要么在契约内换实现，要么先发一条 Deviation Notice 说明 WHAT/WHY/IMPACT 等用户决定".to_string(),
+                        ],
+                    );
+                }
+
+                HarnessGate::NeedEvidence(req) => {
+                    self.emit_tool_audit(
+                        run_id,
+                        iteration,
+                        tool_call,
+                        AgentToolAuditStatus::Blocked,
+                        "atlas_needs_impact_evidence",
+                    );
+                    emit_blocked_operation(event_tx, tool_call, req.reason.clone());
+                    return ToolResult::recoverable_error(
+                        format!("Atlas：{}", req.reason),
+                        vec![
+                            format!("先运行：{}", req.suggested_command),
+                            "确认影响面后再重试这次修改；不要凭判断断言它‘安全/无影响’".to_string(),
+                        ],
+                    );
+                }
+
+                HarnessGate::Disclose { reason, violations } => {
+                    let detail = violations
+                        .iter()
+                        .map(|v| format!("[{}] {}", v.item_id, v.why))
+                        .collect::<Vec<_>>()
+                        .join("；");
+                    self.emit_tool_audit(
+                        run_id,
+                        iteration,
+                        tool_call,
+                        AgentToolAuditStatus::Blocked,
+                        "atlas_requires_disclosure",
+                    );
+                    emit_blocked_operation(event_tx, tool_call, reason.clone());
+                    return ToolResult::recoverable_error(
+                        format!("Atlas：{reason}（{detail}）"),
+                        vec![
+                            "先发一条 Deviation Notice：WHAT 你要偏离什么 / WHY / IMPACT"
+                                .to_string(),
+                            "用户确认后再继续；不要静默改变契约范围".to_string(),
+                        ],
+                    );
+                }
+            }
+        }
+        // ===== Atlas 闸结束 =====
+
         self.emit_tool_audit(
             run_id,
             iteration,
@@ -1279,6 +1384,24 @@ impl Agent {
                         },
                     ),
                 }
+                // ↓↓↓ 新增：只读成功 → 记录对该路径的影响扫描，解锁后续对它的修改
+                if matches!(
+                    result.status,
+                    ToolResultStatus::Success | ToolResultStatus::Warning
+                ) {
+                    use crate::agent::atlas_harness::contract_gate::ActionKind;
+                    use crate::agent::atlas_harness::glue::proposed_action_from_tool_call;
+                    let a = proposed_action_from_tool_call(&tool_call.name, &tool_call.arguments);
+                    if matches!(a.kind(), ActionKind::Other) {
+                        if let Some(path) = a.target_path.as_deref() {
+                            self.atlas
+                                .lock()
+                                .expect("atlas mutex poisoned")
+                                .record_impact_scan(path);
+                        }
+                    }
+                }
+                // ↑↑↑
                 result
             }
             Err(error) => {
