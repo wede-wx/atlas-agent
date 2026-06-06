@@ -1,112 +1,93 @@
 # Atlas
 
-Atlas 是一个 local-first 桌面 AI agent，使用 Rust 和 Tauri 构建。
+Atlas 是一个本地优先的桌面 AI 代理(Rust + [Tauri](https://v2.tauri.app/)),围绕一个目标构建:**一个不会"假装完成"的代理。**
 
-这个仓库现在的定位不是纯 architecture-only 导出，而是：
+代理最常见的失败方式不是"做不到"——而是*悄悄漂移*:它悄悄缩小任务范围、把函数打桩、注释掉没通过的测试、改了被要求保留的文件,然后汇报"成功"。靠问模型"你诚实吗?"解决不了这个问题——做出判断的正是那个已经漂移的器官。
 
-```text
-architecture + minimal runnable frontend baseline
-```
+Atlas 把**声明**和**执行**分开。一个请求会被冻结成**目标合同**(必须做什么、不能做什么、要保留什么、范围边界、每一项如何验证),然后一组闸门在每次工具调用**执行前**,把这个动作和合同做机械比对——而不是让模型给自己打分。
 
-也就是说：仓库保留核心 agent 架构，并提供一个可以最小运行的前端基线。当前前端只覆盖真实 chat loop，不是完整产品 UI。我们欢迎 UI 贡献者在这个真实后端边界上继续建设。
+> 本仓库以架构为主,附带一个**最小化的可运行前端基线**。它不是一个完整的产品,也**不是所有的闸门都已接入运行时**(见下文)。**尤其欢迎做前端的贡献者。**
 
-[English README](./README.md)
+[English → README.md](./README.md)
 
-## 当前状态
+## 它是怎么工作的
 
-当前已经接入真实运行链路：
+Harness 有四道闸。我们明确区分"今天运行时里已接通的"和"代码里有但还没接进主循环的":
 
-- `ContractGate`：工具执行前，把 proposed action 与当前 Goal Contract 做结构化比对。
-- `ImpactEvidenceGate`：记录 read/search 证据，并要求高风险越界动作留下证据或披露。
-- `src/` 下的极简前端基线。
-- sessions、messages、chat、`agent-event` stream 的 command bridge。
-- `hooks.rs` 输出处理硬化，覆盖高输出命令和 UTF-8 tail。
+| 闸门 | 作用 | 状态 |
+|---|---|---|
+| **ContractGate** | 在工具动作执行**前**,把它和目标合同做结构比对(保留路径、禁止模式、范围边界)。 | ✅ 已接通 |
+| **ImpactEvidenceGate** | 记录读取/搜索证据,在高风险的越界修改前要求提供证据或发起披露。 | ✅ 已接通 |
+| **Verifier** | 任务允许标记为完成前,进行一次独立的、只读的对抗式审查。 | ⏳ 代码已有,未接通 |
+| **CompletionGate** | `done` 必须绑定真实的验证产物,而不是模型的自我评估。 | ⏳ 代码已有,未接通 |
 
-代码中已经存在但尚未接入真实运行链路：
+同样存在于代码中但尚未接入运行时:`atlas-verifier` / `team_runtime` 审查集成,以及目标合同的持久化存储。
 
-- `CompletionGate`
-- `Verifier`
-- `atlas-verifier` / `team_runtime` reviewer 集成
-- Goal Contract 持久化
-
-Atlas Harness 是纵深防御层。它可以降低静默目标漂移的概率，并强制高风险动作留下证据或披露，但它不是“agent 永远不会漂移”的证明。
+**Atlas Harness 是纵深防御层,不是证明。** 它提高了目标悄悄漂移的成本,并在高风险动作前强制留下证据或发起披露,但它不能保证代理永远不会漂移。诚实的边界说明见 [SECURITY.md](./SECURITY.md) 和 [docs/REVIEW_FINDINGS.md](./docs/REVIEW_FINDINGS.md)。
 
 ## 快速开始
 
-前置要求：
-
-- 稳定版 Rust
-- Node.js 18+
-- 当前系统对应的 Tauri v2 依赖
-
-安装依赖：
+前置条件:稳定版 **Rust**、**Node.js 18+**,以及你操作系统对应的 [Tauri v2 环境要求](https://v2.tauri.app/start/prerequisites/)。
 
 ```bash
-npm install
+npm install        # 安装前端依赖
+
+npm run dev        # 终端 A — Vite 开发服务器 (http://localhost:1420)
+cd src-tauri && cargo tauri dev   # 终端 B — Tauri 外壳
 ```
 
-启动前端 dev server：
+本地模型(ollama、LM Studio)开箱可用——CSP 已放行 `localhost` / `127.0.0.1`。
 
-```bash
-npm run dev
-```
-
-另开一个终端启动 Tauri shell：
-
-```bash
-cd src-tauri
-cargo tauri dev
-```
-
-常用检查：
+检查和正式构建:
 
 ```bash
 npm run typecheck
 cargo test
-```
-
-前端构建：
-
-```bash
 npm run build
 ```
 
-## 目录概览
+## 仓库地图
 
-```text
-src/
-  bridge.ts                  前端调用后端 command 的唯一入口
-  app.ts                     极简聊天 UI 控制器
-  types.ts                   前端侧 command/event 类型
+```
+src/                          最小化前端基线(TypeScript + Vite)
+  bridge.ts                   对 Tauri 命令的类型化封装 — UI 通过这里调后端
+  types.ts                    从 Rust 侧镜像过来的类型
+  app.ts                      无框架的聊天 UI 控制器
+  main.ts / styles.css        入口 + 座舱风格主题
 src-tauri/src/
-  agent/                     agent runtime 和模型/工具循环
-  agent/atlas_harness/       Goal Contract gates 和 harness 模块
-  commands/                  Tauri command surface
-  storage/                   本地 session/message 存储
+  agent/                      代理运行时和模型/工具主循环
+  agent/atlas_harness/        目标合同 + 各道闸(contract_gate、impact_evidence、
+                              completion_gate、verifier、goal_contract、path_match、glue)
+  commands/                   Tauri 命令面
+  storage/                    本地优先的会话/消息存储
+scripts/                      辅助脚本(如浏览器自动化)
 docs/
-  COMMAND_BRIDGE.md          当前前端/后端命令桥接说明
-  REVIEW_FINDINGS.md         已修复问题和后续项
+  ARCHITECTURE.md             系统架构概览
+  COMMAND_BRIDGE.md           前端 <-> 后端命令 + 事件契约
+  REVIEW_FINDINGS.md          已修复的问题 + 待跟进项
+ATLAS_CODE_REVIEW_COMMAND.md  项目自身的代码审查清单(用 Atlas 审查 Atlas)
 ```
 
-## UI 贡献方向
+## 参与贡献 — 前端是最大的空缺
 
-当前最大贡献方向是 UI。`src/` 里的前端是接通真实后端的起点，不是最终产品体验。
+目前最大的贡献空间是**前端**。`src/` 里的基线是一个真实可接的起点,不是最终产品。你可以扩展它、重新设计风格,或用你熟悉的框架替换;只要保留 `bridge.ts`(或等效文件)作为调用后端的唯一入口就行。
 
-请先阅读：
+从这两个文档开始:
 
 - [CONTRIBUTING.md](./CONTRIBUTING.md)
-- [docs/COMMAND_BRIDGE.md](./docs/COMMAND_BRIDGE.md)
+- [docs/COMMAND_BRIDGE.md](./docs/COMMAND_BRIDGE.md) — UI 对接后端所需的一切(核心命令 + `agent-event` 事件流)。
 
-硬性原则：不要做假按钮。没有接真实 command 的控件，不能伪装成可用功能。
+有一条铁律:**不准假按钮。** 一个控件如果没有真实调用某个后端命令,就不能看起来像能用的。这是一个关于"不假装完成"的项目,UI 也应该守同一条线。
 
 ## 文档
 
-- [README.md](./README.md)
+- [README.md](./README.md)(英文)
 - [CONTRIBUTING.md](./CONTRIBUTING.md)
 - [SECURITY.md](./SECURITY.md)
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
 - [docs/COMMAND_BRIDGE.md](./docs/COMMAND_BRIDGE.md)
 - [docs/REVIEW_FINDINGS.md](./docs/REVIEW_FINDINGS.md)
 
 ## 许可证
 
-Apache-2.0。见 [LICENSE](./LICENSE)。
+[Apache-2.0](./LICENSE)。注意:Apache-2.0 是允许商用的。如果你想限制商用,需要换一个不同的许可证(比如 AGPL-3.0——保持开源,但要求修改版/网络服务版也必须开放源码;或者非商用的源码可见许可证——后者不属于"开源"范畴)。
