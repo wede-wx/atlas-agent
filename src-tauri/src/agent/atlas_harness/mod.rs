@@ -1,24 +1,31 @@
-//! Atlas Harness — orchestration（执行层总入口）。
+//! Atlas Harness — orchestration (execution-layer entry point).
 //!
-//! 双层管制中的**执行层**:Atlas Skill(声明层)产出 Goal Contract 文本并治理对话;
-//! Atlas Harness 把它结构化、冻结,并在工具执行前后做机械强制。
+//! Two-layer control: the Atlas Skill (declaration layer) produces the Goal
+//! Contract text and governs the conversation; the Atlas Harness structures it,
+//! freezes it, and mechanically enforces it before and after tool execution.
 //!
-//! 一句话分工:**Skill 让偏移可见;Harness 让偏移被挡住或被强制留证。**
+//! In one line: **the Skill makes drift visible; the Harness makes drift get
+//! blocked or forced to leave evidence.**
 //!
-//! 四个组件:
-//!   1. ContractGate         —— 动作前结构比对(preserve/must_not_do/scope)。
-//!   2. ImpactEvidenceGate   —— 禁止无证据的“无影响”断言(scope 外先 grep)。
-//!   3. Verifier             —— task/phase 完成前的独立对抗式复查。
-//!   4. CompletionGate       —— done 必须绑定真实验证产物。
+//! Four components:
+//!   1. ContractGate         — pre-action structural comparison (preserve / must_not_do / scope).
+//!   2. ImpactEvidenceGate   — forbids no-impact claims without evidence (grep before out-of-scope edits).
+//!   3. Verifier             — independent adversarial review before task/phase completion.
+//!   4. CompletionGate       — `done` must bind a real verification artifact.
 //!
-//! 设计取向:**松耦合**。本模块只依赖 std + serde + regex,所有与宿主架构的接点都标了
-//! `INTEGRATION:`,由调用方提供 ToolCall→ProposedAction 的转换、契约的读写、reviewer 的派发。
+//! Plus `path_match`: dependency-free, normalization-aware path/glob matching
+//! shared by ContractGate (added in the hardening pass; see
+//! docs/REVIEW_FINDINGS.md).
+//!
+//! Design: **loose coupling.** This module depends only on std + serde; every
+//! host touch-point is marked `INTEGRATION:` and supplied by the caller.
 
 pub mod completion_gate;
 pub mod contract_gate;
 pub mod glue;
 pub mod goal_contract;
 pub mod impact_evidence;
+pub mod path_match;
 pub mod verifier;
 
 pub use completion_gate::{can_mark_done, CompletionDecision, TaskEvidenceRef};
@@ -27,19 +34,19 @@ pub use goal_contract::{GoalContract, ParseResult};
 pub use impact_evidence::{EvidenceRequirement, ImpactLedger};
 pub use verifier::{build_review_prompt, parse_verdict, VerifierVerdict};
 
-/// 一次动作经过 harness 后的综合裁决。
+/// Combined verdict for one action after passing through the harness.
 #[derive(Debug, Clone)]
 pub enum HarnessGate {
-    /// 放行,可静默执行。
+    /// Allowed; may execute silently.
     Allow,
-    /// 需先出影响证据(scope 外、未扫过)。
+    /// Needs impact evidence first (out-of-scope, not yet scanned).
     NeedEvidence(EvidenceRequirement),
-    /// 需披露偏离(软冲突),记 Deviation Notice 后可继续。
+    /// Needs a Deviation Notice (soft conflict); record it, then continue.
     Disclose {
         violations: Vec<Violation>,
         reason: String,
     },
-    /// 硬冲突,拦截,等用户决策。
+    /// Hard conflict; intercept and wait for the user's decision.
     Block {
         violations: Vec<Violation>,
         reason: String,
@@ -52,19 +59,12 @@ impl HarnessGate {
     }
 }
 
-/// 执行层运行时状态。每个 session 一个,契约冻结后驻留。
+/// Execution-layer runtime state. One per session; persists once the contract
+/// is frozen.
+#[derive(Default)]
 pub struct AtlasHarness {
     contract: Option<GoalContract>,
     ledger: ImpactLedger,
-}
-
-impl Default for AtlasHarness {
-    fn default() -> Self {
-        Self {
-            contract: None,
-            ledger: ImpactLedger::default(),
-        }
-    }
 }
 
 impl AtlasHarness {
@@ -72,8 +72,9 @@ impl AtlasHarness {
         Self::default()
     }
 
-    /// 从 Skill 文本块装入并冻结契约。
-    /// INTEGRATION:在 Gate Mode 用户确认 Goal Contract 后调用;把返回的契约持久化到 storage。
+    /// Parse and freeze a contract from a Skill text block.
+    /// INTEGRATION: call once the user confirms the Goal Contract in Gate Mode;
+    /// persist the returned contract to storage.
     pub fn install_contract_from_skill(&mut self, skill_block: &str) -> ParseResult {
         let mut result = GoalContract::parse_from_skill_block(skill_block);
         result.contract.freeze();
@@ -85,23 +86,25 @@ impl AtlasHarness {
         self.contract.as_ref()
     }
 
-    /// 该 session 是否需要全程开启 harness 强制。
+    /// Whether this session needs harness enforcement throughout.
     pub fn is_active(&self) -> bool {
         self.contract
             .as_ref()
             .is_some_and(|c| c.has_hard_constraints())
     }
 
-    /// 动作前总闸:ContractGate ⊕ ImpactEvidenceGate。
-    /// INTEGRATION:在 tools 的 dispatch 处、`policy::evaluate_tool_execution` **之后**调用
-    /// (权限闸先过,目标保真闸再过)。返回非 Allow 时:Block→拒绝并 emit Deviation Notice;
-    /// NeedEvidence→把 suggested_command 回灌给 agent 让它先 grep;Disclose→记录后放行。
+    /// Pre-action gate: ContractGate ⊕ ImpactEvidenceGate.
+    /// INTEGRATION: call at the tools dispatch site, **after**
+    /// `policy::evaluate_tool_execution` (permission gate first, fidelity gate
+    /// next). On non-Allow: Block → refuse + emit a Deviation Notice;
+    /// NeedEvidence → feed `suggested_command` back so the agent greps first;
+    /// Disclose → record, then allow.
     pub fn gate_action(&self, action: &ProposedAction) -> HarnessGate {
         let Some(contract) = &self.contract else {
-            return HarnessGate::Allow; // 无契约(低风险/Inline)→不拦
+            return HarnessGate::Allow; // no contract (low-risk / Inline) → do not gate
         };
 
-        // 1) 结构比对
+        // 1) structural comparison
         match contract_gate::evaluate(action, contract) {
             ContractDecision::Block { violations, reason } => {
                 return HarnessGate::Block { violations, reason }
@@ -112,7 +115,7 @@ impl AtlasHarness {
             ContractDecision::Allow => {}
         }
 
-        // 2) 影响证据(scope 外先 grep)
+        // 2) impact evidence (grep before out-of-scope edits)
         if let Some(req) = impact_evidence::requires_evidence(action, contract, &self.ledger) {
             return HarnessGate::NeedEvidence(req);
         }
@@ -120,13 +123,14 @@ impl AtlasHarness {
         HarnessGate::Allow
     }
 
-    /// agent 出具了对某目标的 usage-scan 证据后调用,解锁后续对该目标的动作。
+    /// Call after the agent produces a usage-scan for a target; unlocks
+    /// subsequent actions on that target.
     pub fn record_impact_scan(&mut self, target: impl Into<String>) {
         self.ledger.record_scan(target);
     }
 
-    /// 完成闸:done 前校验证据绑定。
-    /// INTEGRATION:接进 BeforeTaskDone hook(原生)。
+    /// Completion gate: verify evidence binding before `done`.
+    /// INTEGRATION: wire into the (native) BeforeTaskDone hook.
     pub fn check_completion(&self, task: &TaskEvidenceRef) -> CompletionDecision {
         match &self.contract {
             Some(c) => can_mark_done(task, c),
@@ -134,9 +138,11 @@ impl AtlasHarness {
         }
     }
 
-    /// 生成独立审查 prompt。
-    /// INTEGRATION:把它喂给 team_runtime 起的只读 "atlas-verifier" 子 agent,
-    /// 输出用 `parse_verdict` 解析;blocks_completion()=true 则阻止 done 并把 deviation 转成披露。
+    /// Build the independent review prompt.
+    /// INTEGRATION: feed it to a read-only "atlas-verifier" subagent spawned via
+    /// team_runtime; parse the output with `parse_verdict`; if
+    /// `blocks_completion()` is true, prevent `done` and convert the deviation
+    /// into a disclosure.
     pub fn build_verifier_prompt(&self, diff: &str, test_evidence: &str) -> Option<String> {
         self.contract
             .as_ref()
@@ -173,6 +179,7 @@ mod tests {
         let a = ProposedAction {
             kind_raw: "edit_file".into(),
             target_path: Some("src/shared/util.rs".into()),
+            content_or_diff: Some("export const y = 2".into()),
             ..Default::default()
         };
         assert!(matches!(h.gate_action(&a), HarnessGate::NeedEvidence(_)));

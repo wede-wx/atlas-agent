@@ -1,14 +1,49 @@
-//! Atlas Harness — ContractGate（动作前契约闸）。
+//! Atlas Harness — ContractGate (pre-action goal-fidelity gate), hardened.
 //!
-//! 原理：现有的 `policy.rs::evaluate_tool_execution` 是**权限闸**（这个模式能不能写/能不能跑命令）。
-//! 偏移用的却是**已授权**的能力去做错的事——把功能注释掉的那次 write 在权限闸面前完全合法。
-//! ContractGate 补的是**目标保真闸**：在工具执行前，把 proposed action 的结构（改哪个文件/
-//! 跑什么命令/diff 里有什么模式）和**已冻结的 Goal Contract** 做机械比对。
+//! Relationship to the permission gate
+//! -----------------------------------
+//! `policy.rs::evaluate_tool_execution` is the **permission** gate (may this
+//! mode write / run commands at all). Drift uses *already-authorized*
+//! capabilities to do the wrong thing — commenting a feature out is a perfectly
+//! legal write to the permission gate. ContractGate is the orthogonal
+//! **goal-fidelity** gate: before a tool runs, it compares the *structure* of
+//! the proposed action (which file, which command, what patterns are in the
+//! diff) against the **frozen Goal Contract**. It never asks the model "is this
+//! dangerous?" (that judgment is the broken organ) — it matches structurally.
 //!
-//! 关键点：它**不问 agent “这危不危险”**（那个判断正是坏掉的器官），而是结构匹配。
-//! 命中 preserve / must_not_do → Block 或 RequireDisclosure。镜像 policy 的三态决策。
+//! What changed in the hardening pass (see docs/REVIEW_FINDINGS.md)
+//! ---------------------------------------------------------------
+//! 1. **Path matching** now goes through `path_match::path_matches_glob`, which
+//!    normalizes `.`/`..`/`\`/`//` and matches path suffixes. This closes the
+//!    silent bypasses of a *hard* Preserve via `./`, `..`, backslashes, or an
+//!    absolute path. (Previously a raw-string regex.)
+//! 2. **`is_mutating()` is fail-closed.** Tool-kind was inferred only from the
+//!    tool *name*; a write tool with an unrecognized name (e.g. an MCP tool)
+//!    classified as `Other` and skipped every check. We now also treat an
+//!    action as mutating when its *arguments* look writeful (a path + content,
+//!    or a command), so unknown-but-writeful tools can no longer slip through.
+//! 3. **Command matching is tokenized and high-precision.** The old bare
+//!    substrings `skip` / `disable` matched `--skipLibCheck`, `--disable-foo`,
+//!    `skipper`, etc. (constant false blocks) and were trivially evadable. We
+//!    now tokenize and match exact flags/sequences, and reserve `hard` only for
+//!    verification-defeating commands (`--no-verify`, `xfail`) — the one class
+//!    that must never be silent, because CompletionGate relies on that
+//!    verification.
+//! 4. **Mass-deletion detection works on the common edit path.** For
+//!    `str_replace`-style edits the gate now compares `prior_content` (old_str)
+//!    against the replacement, instead of only scanning a unified diff for `-`
+//!    lines (which an edit's replacement text never contains).
+//! 5. **Content stub detection is word-aware.** Bare `// todo` / `# todo` were
+//!    dropped (every codebase has TODOs; a TODO comment is not a false
+//!    completion — `todo!()` the macro is). `mock`/`stub`/`fake`/`dummy` now
+//!    match as identifier segments with a benign denylist, so `mockup` no
+//!    longer trips the gate while `mockUser` still does.
+//!
+//! The matcher logic was validated against the full bypass + false-positive
+//! corpus before this file was written.
 
 use super::goal_contract::{GoalContract, PreserveKind};
+use super::path_match::path_matches_glob;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,19 +55,25 @@ pub enum ActionKind {
     Other,
 }
 
-/// 从一次 ToolCall 抽出的、与目标保真相关的最小描述。
-/// INTEGRATION：在 registry/core 的 dispatch 处，由 ToolCall(name,args) 构造此结构
-/// （例：edit_file → kind=EditFile, target_path=args.path, content_or_diff=args.new_str）。
+/// Minimal goal-fidelity-relevant description extracted from one ToolCall.
+/// INTEGRATION: built by `glue::proposed_action_from_tool_call` at the dispatch
+/// site. `prior_content` is the pre-edit text (old_str) when the tool exposes
+/// it — used for mass-deletion detection on edits.
 #[derive(Debug, Clone, Default)]
 pub struct ProposedAction {
-    pub kind_raw: String, // 工具名，便于诊断
+    pub kind_raw: String,
     pub target_path: Option<String>,
     pub command: Option<String>,
-    /// 写入内容或 diff 文本——用于检测 stub/mock/注释掉/删测试等模式。
+    /// Replacement text, new file content, or a unified diff.
     pub content_or_diff: Option<String>,
+    /// Pre-edit content (old_str / old_string) when available.
+    pub prior_content: Option<String>,
 }
 
 impl ProposedAction {
+    /// Name-based kind *hint*. Kept for callers that branch on it (e.g. the
+    /// read-scan recorder). It is intentionally only a hint — real
+    /// mutation-ness is decided by [`Self::is_mutating`].
     pub fn kind(&self) -> ActionKind {
         let n = self.kind_raw.to_lowercase();
         if n.contains("delete") || n.contains("remove") || n.contains("rm") {
@@ -52,8 +93,17 @@ impl ProposedAction {
         }
     }
 
-    fn is_mutating(&self) -> bool {
-        !matches!(self.kind(), ActionKind::Other)
+    /// Fail-closed mutation test. True when the name looks mutating, **or** when
+    /// the arguments look writeful regardless of the name. This is what closes
+    /// the unknown-write-tool bypass; it is `pub` so the dispatch site can use
+    /// the same definition when deciding whether a successful call counts as a
+    /// read scan.
+    pub fn is_mutating(&self) -> bool {
+        if !matches!(self.kind(), ActionKind::Other) {
+            return true;
+        }
+        let writeful_args = self.target_path.is_some() && self.content_or_diff.is_some();
+        writeful_args || self.command.is_some()
     }
 }
 
@@ -61,14 +111,11 @@ impl ProposedAction {
 pub struct Violation {
     pub item_id: String,
     pub item_text: String,
-    /// 命中原因（给用户看的人话）。
+    /// Human-readable reason (shown to the user).
     pub why: String,
 }
 
-/// 三态决策，镜像 `policy::PolicyDecision`。
-/// - Allow：与契约不冲突，放行。
-/// - RequireDisclosure：可能偏离，但需先**披露 + 证据**（交给 ImpactEvidenceGate / Deviation Notice）。
-/// - Block：硬冲突，直接挡住，等用户决策。
+/// Three-state decision, mirroring `policy::PolicyDecision`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum ContractDecision {
@@ -92,53 +139,44 @@ impl ContractDecision {
     }
 }
 
-/// 危险代码模式——在写入内容/diff 里命中即视为可能的伪完成/降级。
-/// 这是“按动作签名停”的代码级版本：不依赖 agent 主观判断。
-const DOWNGRADE_PATTERNS: &[(&str, &str)] = &[
-    ("unimplemented!", "占位实现 unimplemented!()"),
-    ("todo!(", "占位实现 todo!()"),
-    ("notimplemented", "占位实现 NotImplemented"),
-    ("// todo", "TODO 占位"),
-    ("# todo", "TODO 占位"),
-    ("placeholder", "placeholder 占位"),
-    ("mock", "mock 替换真实实现的嫌疑"),
-    ("fakedata", "假数据"),
-    ("return null; // stub", "stub 返回"),
-    ("throw new error(\"not", "抛 not-implemented"),
+/// Unambiguous stub markers (substring match is safe — these almost never
+/// appear benignly). Disclosure-level by default.
+const STUB_MARKERS: &[(&str, &str)] = &[
+    ("unimplemented!", "placeholder unimplemented!()"),
+    ("todo!(", "placeholder todo!()"),
+    ("unreachable!(", "placeholder unreachable!()"),
+    ("notimplementederror", "NotImplementedError placeholder"),
+    ("raise notimplemented", "raise NotImplemented"),
+    ("not implemented", "\"not implemented\" placeholder"),
+    ("placeholder", "explicit placeholder"),
 ];
 
-/// 命令层的破坏性模式（删测试 / 跳过校验 / 强推）。
-const DANGEROUS_COMMAND_PATTERNS: &[(&str, &str)] = &[
-    ("--no-verify", "跳过校验钩子 (--no-verify)"),
-    ("rm -rf", "递归删除"),
-    ("git reset --hard", "硬重置丢弃改动"),
-    ("git push --force", "强推覆盖历史"),
-    ("skip", "疑似跳过（skip）测试/校验"),
-    ("xfail", "把测试标记为预期失败"),
-    (".skip(", "测试 .skip()"),
-    ("disable", "禁用（disable）某项行为"),
-];
+/// Mock-family identifier roots, matched as identifier segments (not raw
+/// substrings) with a benign denylist so `mockup` does not trip the gate.
+const MOCK_ROOTS: &[&str] = &["mock", "stub", "fake", "dummy"];
+const MOCK_BENIGN: &[&str] = &["mockup", "mockups", "smock", "hammock", "mockingbird"];
 
-/// 核心：把一次 proposed action 和契约做结构比对。纯函数，无 LLM、无 IO。
+/// Core: structurally compare one proposed action against the contract.
+/// Pure function — no LLM, no I/O.
 pub fn evaluate(action: &ProposedAction, contract: &GoalContract) -> ContractDecision {
     if !action.is_mutating() {
-        return ContractDecision::Allow; // 只读动作不受目标保真闸约束
+        return ContractDecision::Allow; // read-only actions are out of scope here
     }
 
     let mut violations: Vec<Violation> = Vec::new();
     let mut hard = false;
 
-    // 1) Preserve（File / LayoutStructure）：动到被保留路径 → 硬冲突。
+    // 1) Preserve (File / LayoutStructure): touching a preserved path is a hard conflict.
     if let Some(path) = action.target_path.as_deref() {
         for p in &contract.preserve {
             if matches!(p.kind, PreserveKind::File | PreserveKind::LayoutStructure) {
                 if let Some(glob) = &p.path_glob {
-                    if glob_matches(glob, path) {
+                    if path_matches_glob(glob, path) {
                         hard = true;
                         violations.push(Violation {
                             item_id: p.id.clone(),
                             item_text: p.text.clone(),
-                            why: format!("修改了被 Preserve 的路径 `{path}`（匹配 `{glob}`）"),
+                            why: format!("modifies Preserve path `{path}` (matches `{glob}`)"),
                         });
                     }
                 }
@@ -146,67 +184,57 @@ pub fn evaluate(action: &ProposedAction, contract: &GoalContract) -> ContractDec
         }
     }
 
-    // 2) 内容/diff 里的降级模式（stub/mock/占位/删测试）。
+    // 2) Downgrade patterns in the written content / diff (stub / mock / placeholder).
     if let Some(body) = action.content_or_diff.as_deref() {
         let lower = body.to_lowercase();
-        for (pat, why) in DOWNGRADE_PATTERNS {
+        for (pat, why) in STUB_MARKERS {
             if lower.contains(pat) {
-                // 命中 must_not_do 的 mock/stub 防线 → 需披露（可能是合理的 test-only mock，交给用户/证据判断）
-                let item = contract.must_not_do.iter().find(|i| {
-                    i.id == "N-mock" || i.text.contains("mock") || i.text.contains("stub")
-                });
-                violations.push(Violation {
-                    item_id: item
-                        .map(|i| i.id.clone())
-                        .unwrap_or_else(|| "N-mock".into()),
-                    item_text: item.map(|i| i.text.clone()).unwrap_or_default(),
-                    why: format!("写入内容包含 {why}"),
-                });
+                violations.push(downgrade_violation(
+                    contract,
+                    &format!("written content contains {why}"),
+                ));
             }
         }
-        // 删除导出符号 / 大段删除的粗检（diff 以 '-' 开头的行占比高）
-        if looks_like_mass_deletion(body) {
+        if let Some(tok) = first_mock_like(&lower) {
+            violations.push(downgrade_violation(
+                contract,
+                &format!("written content references `{tok}` (possible mock/stub replacing a real implementation)"),
+            ));
+        }
+        if looks_like_mass_deletion(action) {
             violations.push(Violation {
                 item_id: "N-hide".into(),
-                item_text: "未经披露不得隐藏/移除请求的功能".into(),
-                why: "diff 中存在大段删除，可能在移除已实现行为".into(),
+                item_text: "must not hide/remove requested functionality without disclosure".into(),
+                why: "edit removes a large block — may be deleting implemented behavior".into(),
             });
         }
     }
 
-    // 3) 命令层破坏性模式。
+    // 3) Destructive / verification-defeating commands.
     if let Some(cmd) = action.command.as_deref() {
-        let lower = cmd.to_lowercase();
-        for (pat, why) in DANGEROUS_COMMAND_PATTERNS {
-            if lower.contains(pat) {
-                // 删/弱化测试命中 must_not_do 的 N-test → 硬
-                let test_related = matches!(*pat, "skip" | "xfail" | ".skip(" | "disable");
-                if test_related {
-                    hard = true;
-                }
-                violations.push(Violation {
-                    item_id: "N-test".into(),
-                    item_text: "未经披露不得删除/弱化保护契约项的测试".into(),
-                    why: format!("命令包含 {why}"),
-                });
+        for hit in command_hits(cmd) {
+            if hit.hard {
+                hard = true;
             }
+            violations.push(Violation {
+                item_id: hit.item_id.into(),
+                item_text: hit.item_text.into(),
+                why: hit.why,
+            });
         }
     }
 
-    // 4) 范围越界：动到既不在 in_scope、又明确属于 out_of_scope 的目标 → 需披露。
+    // 4) Out-of-scope target → disclosure (segment/glob aware, not naive substring).
     if let Some(path) = action.target_path.as_deref() {
-        if !contract.scope.out_of_scope.is_empty()
-            && contract
-                .scope
-                .out_of_scope
-                .iter()
-                .any(|s| path.contains(s.as_str()))
-        {
-            violations.push(Violation {
-                item_id: "scope".into(),
-                item_text: "范围外目标".into(),
-                why: format!("`{path}` 落在声明的 out_of_scope 内"),
-            });
+        for entry in &contract.scope.out_of_scope {
+            if out_of_scope_hit(entry, path) {
+                violations.push(Violation {
+                    item_id: "scope".into(),
+                    item_text: "out-of-scope target".into(),
+                    why: format!("`{path}` falls under declared out_of_scope `{entry}`"),
+                });
+                break;
+            }
         }
     }
 
@@ -214,59 +242,159 @@ pub fn evaluate(action: &ProposedAction, contract: &GoalContract) -> ContractDec
         ContractDecision::Allow
     } else if hard {
         ContractDecision::Block {
-            reason: "动作与硬性契约项冲突，已拦截，等待用户决策".into(),
+            reason: "action conflicts with a hard contract item; blocked pending user decision"
+                .into(),
             violations,
         }
     } else {
         ContractDecision::RequireDisclosure {
-            reason: "动作可能偏离契约，需先披露并给出证据后才能继续".into(),
+            reason: "action may deviate from the contract; disclose and provide evidence before continuing".into(),
             violations,
         }
     }
 }
 
-/// 极简 glob：支持 `**`（任意层）/ `*`（单层内任意）/ 字面量。够 ContractGate 用，避免引新依赖。
-fn glob_matches(glob: &str, path: &str) -> bool {
-    fn to_regex(glob: &str) -> String {
-        let mut re = String::from("^");
-        let bytes: Vec<char> = glob.chars().collect();
-        let mut i = 0;
-        while i < bytes.len() {
-            match bytes[i] {
-                '*' => {
-                    if i + 1 < bytes.len() && bytes[i + 1] == '*' {
-                        re.push_str(".*");
-                        i += 2;
-                        continue;
-                    }
-                    re.push_str("[^/]*");
-                }
-                '.' => re.push_str("\\."),
-                '/' => re.push('/'),
-                c => re.push(c),
-            }
-            i += 1;
-        }
-        re.push('$');
-        re
-    }
-    match regex::Regex::new(&to_regex(glob)) {
-        Ok(re) => re.is_match(path),
-        Err(_) => path.contains(glob.trim_end_matches(['*', '/'])),
+fn downgrade_violation(contract: &GoalContract, why: &str) -> Violation {
+    let item = contract
+        .must_not_do
+        .iter()
+        .find(|i| i.id == "N-mock" || i.text.contains("mock") || i.text.contains("stub"));
+    Violation {
+        item_id: item
+            .map(|i| i.id.clone())
+            .unwrap_or_else(|| "N-mock".into()),
+        item_text: item.map(|i| i.text.clone()).unwrap_or_default(),
+        why: why.to_string(),
     }
 }
 
-fn looks_like_mass_deletion(diff: &str) -> bool {
-    let mut minus = 0usize;
-    let mut plus = 0usize;
-    for l in diff.lines() {
-        if l.starts_with('-') && !l.starts_with("---") {
-            minus += 1;
-        } else if l.starts_with('+') && !l.starts_with("+++") {
-            plus += 1;
+/// Return the first mock-family identifier segment that is not in the benign
+/// denylist, scanning identifier-like tokens (alphanumeric + `_`).
+fn first_mock_like(lower: &str) -> Option<String> {
+    for token in lower.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+        if token.is_empty() || MOCK_BENIGN.contains(&token) {
+            continue;
+        }
+        if MOCK_ROOTS.iter().any(|root| token.contains(root)) {
+            return Some(token.to_string());
         }
     }
-    minus >= 15 && minus > plus * 3
+    None
+}
+
+struct CommandHit {
+    item_id: &'static str,
+    item_text: &'static str,
+    why: String,
+    hard: bool,
+}
+
+/// Tokenized command analysis. High precision: exact flags / command sequences,
+/// no bare `skip` / `disable`. Only verification-defeating commands are `hard`.
+fn command_hits(cmd: &str) -> Vec<CommandHit> {
+    let toks: Vec<String> = cmd
+        .to_lowercase()
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&'))
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .collect();
+    let has = |t: &str| toks.iter().any(|x| x == t);
+    let mut hits = Vec::new();
+
+    if has("--no-verify") {
+        hits.push(CommandHit {
+            item_id: "N-test",
+            item_text: "must not skip/weaken verification protecting contract items",
+            why: "command skips verification hooks (--no-verify)".into(),
+            hard: true,
+        });
+    }
+    if toks.iter().any(|t| t == "xfail") {
+        hits.push(CommandHit {
+            item_id: "N-test",
+            item_text: "must not skip/weaken verification protecting contract items",
+            why: "command marks tests as expected-fail (xfail)".into(),
+            hard: true,
+        });
+    }
+    // Destructive but sometimes legitimate (e.g. `rm -rf build/`): disclosure, not hard.
+    let rm_force = toks.iter().any(|t| {
+        let f = t.trim_start_matches('-');
+        t.starts_with('-') && f.contains('r') && f.contains('f')
+    });
+    if has("rm") && (rm_force || has("--recursive")) {
+        hits.push(CommandHit {
+            item_id: "N-hide",
+            item_text: "must not destroy work without disclosure",
+            why: "recursive force delete (rm -rf)".into(),
+            hard: false,
+        });
+    }
+    if has("git") && has("reset") && has("--hard") {
+        hits.push(CommandHit {
+            item_id: "N-hide",
+            item_text: "must not destroy work without disclosure",
+            why: "discards working changes (git reset --hard)".into(),
+            hard: false,
+        });
+    }
+    if has("git") && has("push") && (has("--force") || has("-f")) {
+        // --force-with-lease is the safe form and is not flagged.
+        hits.push(CommandHit {
+            item_id: "N-hide",
+            item_text: "must not destroy work without disclosure",
+            why: "force pushes / rewrites history (git push --force)".into(),
+            hard: false,
+        });
+    }
+    hits
+}
+
+/// Out-of-scope hit: glob entries match via the path matcher; plain entries
+/// match as a path-segment prefix (boundary aware), not a raw substring.
+fn out_of_scope_hit(entry: &str, path: &str) -> bool {
+    if entry.contains('*') || entry.contains('?') {
+        return path_matches_glob(entry, path);
+    }
+    let np = super::path_match::normalize_rel_path(path);
+    let ne = super::path_match::normalize_rel_path(entry);
+    let np = np.trim_start_matches('/');
+    let ne = ne.trim_start_matches('/');
+    if ne.is_empty() {
+        return false;
+    }
+    // segment-boundary prefix: `src/legacy` matches `src/legacy/x.rs` but not `src/legacyx`.
+    np == ne || np.starts_with(&format!("{ne}/")) || np.split('/').any(|seg| seg == ne)
+}
+
+fn looks_like_mass_deletion(action: &ProposedAction) -> bool {
+    let body = match action.content_or_diff.as_deref() {
+        Some(b) => b,
+        None => return false,
+    };
+    let is_unified_diff = body
+        .lines()
+        .any(|l| l.starts_with("@@") || l.starts_with("--- ") || l.starts_with("+++ "));
+    if is_unified_diff {
+        let mut minus = 0usize;
+        let mut plus = 0usize;
+        for l in body.lines() {
+            if l.starts_with('-') && !l.starts_with("---") {
+                minus += 1;
+            } else if l.starts_with('+') && !l.starts_with("+++") {
+                plus += 1;
+            }
+        }
+        return minus >= 15 && minus > plus * 3;
+    }
+    // Edit path: compare prior content line count to the replacement.
+    if let Some(prior) = action.prior_content.as_deref() {
+        let old_lines = prior.lines().count();
+        let new_lines = body.lines().count();
+        return old_lines.saturating_sub(new_lines) >= 15
+            && old_lines > new_lines.saturating_mul(3);
+    }
+    false
 }
 
 #[cfg(test)]
@@ -274,73 +402,134 @@ mod tests {
     use super::*;
     use crate::agent::atlas_harness::goal_contract::GoalContract;
 
-    fn contract() -> GoalContract {
-        let text = r#"
-Goal:
-- ship feature X
-Must Do:
-- [M1] implement feature X (hard)
-Preserve:
-- [P1] keep layout in src/ui/** (layout)
-Out Of Scope:
-- billing
-"#;
-        GoalContract::parse_from_skill_block(text).contract
+    fn contract_with_preserve() -> GoalContract {
+        let mut c = GoalContract::default();
+        c.preserve.push(super::super::goal_contract::PreserveItem {
+            id: "P1".into(),
+            text: "keep UI layout".into(),
+            kind: PreserveKind::LayoutStructure,
+            path_glob: Some("src/ui/**".into()),
+        });
+        c.must_not_do
+            .push(super::super::goal_contract::ContractItem {
+                id: "N-mock".into(),
+                text: "no mock replacing real impl".into(),
+                hard: true,
+                source_quote: None,
+                verify: None,
+            });
+        c
     }
 
     #[test]
-    fn editing_preserved_path_is_blocked() {
+    fn preserve_block_survives_path_obfuscation() {
+        let c = contract_with_preserve();
+        for p in [
+            "src/ui/App.tsx",
+            "./src/ui/App.tsx",
+            "/abs/root/src/ui/App.tsx",
+            "src\\ui\\App.tsx",
+        ] {
+            let a = ProposedAction {
+                kind_raw: "edit_file".into(),
+                target_path: Some(p.into()),
+                ..Default::default()
+            };
+            assert!(
+                evaluate(&a, &c).is_block(),
+                "should block obfuscated path {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_named_write_tool_is_still_gated() {
+        // Tool name does not look mutating, but args are writeful → must be gated.
+        let c = contract_with_preserve();
         let a = ProposedAction {
-            kind_raw: "edit_file".into(),
-            target_path: Some("src/ui/Canvas.tsx".into()),
+            kind_raw: "mcp_filesystem_apply".into(), // classifies as Other
+            target_path: Some("src/ui/App.tsx".into()),
+            content_or_diff: Some("export const x = 1".into()),
             ..Default::default()
         };
-        assert!(evaluate(&a, &contract()).is_block());
+        assert!(a.is_mutating());
+        assert!(evaluate(&a, &c).is_block());
     }
 
     #[test]
-    fn stub_content_requires_disclosure() {
+    fn skiplibcheck_is_not_flagged() {
+        let c = contract_with_preserve();
         let a = ProposedAction {
-            kind_raw: "write_file".into(),
-            target_path: Some("src/api/auth.rs".into()),
-            content_or_diff: Some("fn login() { todo!() }".into()),
+            kind_raw: "bash".into(),
+            command: Some("tsc --skipLibCheck && npm run build".into()),
             ..Default::default()
         };
-        let d = evaluate(&a, &contract());
-        assert!(matches!(d, ContractDecision::RequireDisclosure { .. }));
+        assert_eq!(evaluate(&a, &c), ContractDecision::Allow);
     }
 
     #[test]
-    fn deleting_tests_via_command_is_blocked() {
+    fn no_verify_is_a_hard_block() {
+        let c = contract_with_preserve();
         let a = ProposedAction {
-            kind_raw: "command".into(),
-            command: Some("pytest --skip-broken && sed -i 's/test_/xtest_/'".into()),
+            kind_raw: "bash".into(),
+            command: Some("git commit --no-verify -m wip".into()),
             ..Default::default()
         };
-        assert!(evaluate(&a, &contract()).is_block());
+        assert!(evaluate(&a, &c).is_block());
     }
 
     #[test]
-    fn clean_in_scope_edit_is_allowed() {
-        let a = ProposedAction {
-            kind_raw: "edit_file".into(),
-            target_path: Some("src/feature_x.rs".into()),
-            content_or_diff: Some("pub fn x() -> i32 { 42 }".into()),
+    fn mockup_does_not_trip_but_mock_user_does() {
+        let c = contract_with_preserve();
+        let benign = ProposedAction {
+            kind_raw: "write".into(),
+            target_path: Some("src/x.ts".into()),
+            content_or_diff: Some("// render the mockup preview".into()),
             ..Default::default()
         };
-        assert_eq!(evaluate(&a, &contract()), ContractDecision::Allow);
-    }
+        assert_eq!(evaluate(&benign, &c), ContractDecision::Allow);
 
-    #[test]
-    fn out_of_scope_target_requires_disclosure() {
-        let a = ProposedAction {
-            kind_raw: "edit_file".into(),
-            target_path: Some("src/billing/charge.rs".into()),
+        let mocky = ProposedAction {
+            kind_raw: "write".into(),
+            target_path: Some("src/x.ts".into()),
+            content_or_diff: Some("const user = mockUser();".into()),
             ..Default::default()
         };
         assert!(matches!(
-            evaluate(&a, &contract()),
+            evaluate(&mocky, &c),
             ContractDecision::RequireDisclosure { .. }
         ));
+    }
+
+    #[test]
+    fn mass_deletion_detected_on_edit_via_prior_content() {
+        let c = contract_with_preserve();
+        let prior = (0..40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let a = ProposedAction {
+            kind_raw: "str_replace".into(),
+            target_path: Some("src/service.rs".into()),
+            command: None,
+            content_or_diff: Some("// removed".into()),
+            prior_content: Some(prior),
+        };
+        assert!(matches!(
+            evaluate(&a, &c),
+            ContractDecision::RequireDisclosure { .. }
+        ));
+    }
+
+    #[test]
+    fn read_only_is_allowed() {
+        let c = contract_with_preserve();
+        let a = ProposedAction {
+            kind_raw: "read_file".into(),
+            target_path: Some("src/ui/App.tsx".into()),
+            ..Default::default()
+        };
+        assert!(!a.is_mutating());
+        assert_eq!(evaluate(&a, &c), ContractDecision::Allow);
     }
 }

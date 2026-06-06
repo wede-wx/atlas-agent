@@ -737,7 +737,7 @@ impl Agent {
                 let need_contract = self
                     .atlas
                     .lock()
-                    .expect("atlas mutex poisoned")
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .contract()
                     .is_none();
                 if need_contract {
@@ -746,7 +746,7 @@ impl Agent {
                         let _ = self
                             .atlas
                             .lock()
-                            .expect("atlas mutex poisoned")
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .install_contract_from_skill(block);
                         // 可选：把契约持久化到 storage，便于会话重入
                     }
@@ -1248,11 +1248,13 @@ impl Agent {
             use crate::agent::atlas_harness::HarnessGate;
 
             let action = proposed_action_from_tool_call(&tool_call.name, &tool_call.arguments);
-            // 锁只在这一行持有；gate_action 返回的是自有值，guard 随即释放。
+            // Lock held only for this call; gate_action returns an owned value,
+            // so the guard is released immediately. Recover a poisoned lock so
+            // the safety gate keeps enforcing after an unrelated panic.
             let gate = self
                 .atlas
                 .lock()
-                .expect("atlas mutex poisoned")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .gate_action(&action);
 
             match gate {
@@ -1389,14 +1391,15 @@ impl Agent {
                     result.status,
                     ToolResultStatus::Success | ToolResultStatus::Warning
                 ) {
-                    use crate::agent::atlas_harness::contract_gate::ActionKind;
                     use crate::agent::atlas_harness::glue::proposed_action_from_tool_call;
                     let a = proposed_action_from_tool_call(&tool_call.name, &tool_call.arguments);
-                    if matches!(a.kind(), ActionKind::Other) {
+                    // Only genuinely read-only calls count as impact scans.
+                    // Unknown write tools must not be recorded as reads.
+                    if !a.is_mutating() {
                         if let Some(path) = a.target_path.as_deref() {
                             self.atlas
                                 .lock()
-                                .expect("atlas mutex poisoned")
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
                                 .record_impact_scan(path);
                         }
                     }

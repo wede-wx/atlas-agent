@@ -281,13 +281,12 @@ fn parse_item(line: &str) -> Option<ContractItem> {
     // 拆出尾部括号里的元信息（英文/中文括号都认）
     let (text, meta) = split_meta(rest);
     let lower = meta.to_lowercase();
-    let hard = lower.contains("hard") || meta.contains("硬性") || meta.contains("硬性约束");
     let soft = lower.contains("soft") || meta.contains("软性");
     Some(ContractItem {
         id,
         text: text.trim().to_string(),
         // 默认按硬处理（“拿不准就当 hard”），除非明确标 soft。
-        hard: if soft { false } else { hard || true },
+        hard: !soft,
         source_quote: extract_quoted(meta, &["source:", "来源："]),
         verify: extract_field(meta, &["verify:", "验证："]),
     })

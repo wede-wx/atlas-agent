@@ -1,0 +1,20 @@
+{
+  "name": "atlas-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Baseline frontend for the Atlas agent. A clean, minimal starting point — fork it, redesign it, or replace it. The value here is the wired command bridge, not the pixels.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0"
+  }
+}

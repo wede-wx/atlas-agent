@@ -887,6 +887,7 @@ fn contains_any(content: &str, needles: &[&str]) -> bool {
         .any(|needle| content.contains(needle) || lower.contains(&needle.to_ascii_lowercase()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decision(
     intent: TaskIntent,
     tool_decision: ToolUseDecision,
