@@ -111,7 +111,4 @@ Start here:
 
 ## License
 
-[Apache-2.0](./LICENSE). Note: Apache-2.0 permits commercial use. If you'd
-rather restrict that, you'd need a different license (e.g. AGPL-3.0 to keep it
-open while requiring source disclosure for modified/network use, or a
-non-commercial source-available license — which is not "open source").
+[Apache-2.0](./LICENSE). 
