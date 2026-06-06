@@ -1,115 +1,121 @@
 # Atlas
 
-Atlas is a local-first desktop AI agent built with Rust and Tauri.
+Atlas is a local-first desktop AI agent (Rust + [Tauri](https://v2.tauri.app/))
+built around one goal: **an agent that won't fake "done."**
 
-This repository is no longer a pure architecture export. It is an
-architecture-focused repository with a minimal runnable frontend baseline. The
-frontend is intentionally small: it proves the core chat loop can connect to the
-backend, but it is not a completed product UI. UI contributors are welcome.
+Most agent failures aren't "it couldn't do the task" — they're *silent goal
+drift*: the agent quietly narrows the goal, stubs a function, comments out a
+failing test, edits a file it was told to preserve, and then reports success.
+You can't fix that by asking the model "are you being honest?" — that's the same
+judgment that already drifted.
 
-[中文说明](./README.zh-CN.md)
+Atlas separates **declaration** from **enforcement**. A request is frozen into a
+**Goal Contract** (what must happen, what must not, what to preserve, scope, and
+how each item is verified), and a set of gates check every tool action against
+that contract *mechanically* — not by asking the model to grade itself.
 
-## Current Status
+> This repository is architecture-focused with a **minimal, runnable frontend
+> baseline**. It is not a finished product, and **not every gate is wired into
+> the runtime yet** (see below). **UI contributors are especially welcome.**
 
-Runtime-wired today:
+[中文说明 → README.zh-CN.md](./README.zh-CN.md)
 
-- `ContractGate`: checks proposed tool actions against the active Goal Contract
-  before execution.
-- `ImpactEvidenceGate`: records read/search evidence and requires evidence or
-  disclosure before risky out-of-scope actions.
-- Minimal frontend baseline in `src/`.
-- Core command bridge for sessions, messages, chat, and `agent-event` streaming.
-- Hook output handling hardening for high-output commands and UTF-8 tails.
+## How it works
 
-Present in the codebase but not wired into the runtime path yet:
+The harness has four gates. We're explicit about what is enforced at runtime
+today versus what exists in the code but isn't wired into the run loop yet:
 
-- `CompletionGate`
-- `Verifier`
-- `atlas-verifier` / `team_runtime` reviewer integration
-- Goal Contract storage persistence
+| Gate | What it does | Status |
+|---|---|---|
+| **ContractGate** | Structurally compares each proposed tool action to the contract (preserve paths, forbidden patterns, scope) **before** it runs. | ✅ wired |
+| **ImpactEvidenceGate** | Records read/search evidence and requires evidence or disclosure before risky out-of-scope actions. | ✅ wired |
+| **Verifier** | Independent, read-only adversarial review before a task may complete. | ⏳ present, not wired |
+| **CompletionGate** | `done` must bind a real verification artifact, not the model's self-assessment. | ⏳ present, not wired |
 
-Atlas Harness is a defense-in-depth layer. It reduces silent goal drift and
-forces evidence or disclosure around risky actions, but it is not a proof that an
-agent can never drift.
+Also present-but-not-yet-wired: the `atlas-verifier` / `team_runtime` reviewer
+integration and Goal Contract storage persistence.
 
-## Quick Start
+**The Atlas Harness is a defense-in-depth layer, not a proof.** It raises the
+cost of silent goal drift and forces evidence or disclosure around risky
+actions; it does not guarantee an agent can never drift. See
+[SECURITY.md](./SECURITY.md) and [docs/REVIEW_FINDINGS.md](./docs/REVIEW_FINDINGS.md)
+for an honest account of its limits.
 
-Prerequisites:
+## Quick start
 
-- Stable Rust
-- Node.js 18+
-- Tauri v2 system prerequisites for your operating system
-
-Install dependencies:
-
-```bash
-npm install
-```
-
-Run the frontend dev server:
-
-```bash
-npm run dev
-```
-
-In a second terminal, run the Tauri shell:
+Prerequisites: stable **Rust**, **Node.js 18+**, and the
+[Tauri v2 system prerequisites](https://v2.tauri.app/start/prerequisites/) for
+your OS.
 
 ```bash
-cd src-tauri
-cargo tauri dev
+npm install        # frontend deps
+
+npm run dev        # terminal A — Vite dev server (http://localhost:1420)
+cd src-tauri && cargo tauri dev   # terminal B — the Tauri shell
 ```
 
-Useful checks:
+Local model providers (ollama, LM Studio) work out of the box — the CSP already
+allows `localhost` / `127.0.0.1`.
+
+Checks and a release-style build:
 
 ```bash
 npm run typecheck
 cargo test
-```
-
-For a release-style frontend build:
-
-```bash
 npm run build
 ```
 
-## Repository Map
+## Repository map
 
-```text
-src/
-  bridge.ts                  typed frontend entry point for backend commands
-  app.ts                     minimal chat UI controller
-  types.ts                   frontend-facing command and event types
+```
+src/                          minimal frontend baseline (TypeScript + Vite)
+  bridge.ts                   typed wrappers over Tauri commands — the UI talks to the backend here
+  types.ts                    types mirrored from the Rust side
+  app.ts                      framework-free chat UI controller
+  main.ts / styles.css        entry point + cockpit-style theme
 src-tauri/src/
-  agent/                     agent runtime and model/tool loop
-  agent/atlas_harness/       Goal Contract gates and harness modules
-  commands/                  Tauri command surface
-  storage/                   local session/message storage
+  agent/                      agent runtime and the model/tool loop
+  agent/atlas_harness/        Goal Contract + gates (contract_gate, impact_evidence,
+                              completion_gate, verifier, goal_contract, path_match, glue)
+  commands/                   Tauri command surface
+  storage/                    local-first session/message storage
+scripts/                      helper scripts (e.g. browser automation)
 docs/
-  COMMAND_BRIDGE.md          current frontend/backend command bridge
-  REVIEW_FINDINGS.md         fixed issues and remaining follow-ups
+  ARCHITECTURE.md             system overview
+  COMMAND_BRIDGE.md           frontend <-> backend command + event contract
+  REVIEW_FINDINGS.md          fixed issues + remaining follow-ups
+ATLAS_CODE_REVIEW_COMMAND.md  the project's own code-review checklist (used to dogfood Atlas)
 ```
 
-## UI Contributors
+## Contributing — the UI is the biggest open area
 
-The largest open contribution area is the UI. The baseline frontend should be
-treated as a real, connected starting point, not as the final experience.
+The largest contribution area is the **frontend**. The baseline in `src/` is a
+real, connected starting point — not the final experience. Extend it, restyle
+it, or replace it with your framework of choice; keep `bridge.ts` (or an
+equivalent) as the single source of truth for backend calls.
 
 Start here:
 
 - [CONTRIBUTING.md](./CONTRIBUTING.md)
-- [docs/COMMAND_BRIDGE.md](./docs/COMMAND_BRIDGE.md)
+- [docs/COMMAND_BRIDGE.md](./docs/COMMAND_BRIDGE.md) — everything a UI needs to
+  talk to the backend (the core commands + the `agent-event` stream).
 
-One rule is non-negotiable: no fake buttons. If a control does not call a real
-backend command, it must not look usable.
+One rule is non-negotiable: **no fake buttons.** If a control doesn't call a
+real backend command, it must not look usable. This is a project about not
+faking completion; the UI should hold the same line.
 
 ## Documentation
 
 - [README.zh-CN.md](./README.zh-CN.md)
 - [CONTRIBUTING.md](./CONTRIBUTING.md)
 - [SECURITY.md](./SECURITY.md)
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)
 - [docs/COMMAND_BRIDGE.md](./docs/COMMAND_BRIDGE.md)
 - [docs/REVIEW_FINDINGS.md](./docs/REVIEW_FINDINGS.md)
 
 ## License
 
-Apache-2.0. See [LICENSE](./LICENSE).
+[Apache-2.0](./LICENSE). Note: Apache-2.0 permits commercial use. If you'd
+rather restrict that, you'd need a different license (e.g. AGPL-3.0 to keep it
+open while requiring source disclosure for modified/network use, or a
+non-commercial source-available license — which is not "open source").
