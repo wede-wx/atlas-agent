@@ -18,7 +18,7 @@ crate-type = ["rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
@@ -41,26 +41,3 @@ regex = "1.10"
 
 [dev-dependencies]
 tempfile = "3"
-
-[target."cfg(any(target_os = \"macos\", windows, target_os = \"linux\"))".dependencies]
-tauri-plugin-global-shortcut = "2"
-
-[target.'cfg(windows)'.dependencies]
-png = "0.17"
-windows = { version = "0.61.3", features = [
-  "Foundation",
-  "Graphics",
-  "Graphics_Capture",
-  "Graphics_DirectX",
-  "Graphics_DirectX_Direct3D11",
-  "Win32_Foundation",
-  "Win32_Graphics_Direct3D",
-  "Win32_Graphics_Direct3D11",
-  "Win32_Graphics_Dxgi",
-  "Win32_Graphics_Dxgi_Common",
-  "Win32_Graphics_Gdi",
-  "Win32_System_WinRT",
-  "Win32_System_WinRT_Direct3D11",
-  "Win32_System_WinRT_Graphics_Capture",
-  "Win32_UI_WindowsAndMessaging",
-] }

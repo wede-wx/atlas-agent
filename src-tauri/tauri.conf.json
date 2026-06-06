@@ -21,21 +21,6 @@
         "resizable": true,
         "center": true,
         "visible": true
-      },
-      {
-        "label": "float",
-        "title": "Atlas",
-        "url": "/#float",
-        "width": 252,
-        "height": 52,
-        "decorations": false,
-        "transparent": true,
-        "resizable": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "visible": false,
-        "x": 100,
-        "y": 100
       }
     ],
     "security": {
