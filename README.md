@@ -100,10 +100,6 @@ Start here:
 - [docs/COMMAND_BRIDGE.md](./docs/COMMAND_BRIDGE.md) — everything a UI needs to
   talk to the backend (the core commands + the `agent-event` stream).
 
-One rule is non-negotiable: **no fake buttons.** If a control doesn't call a
-real backend command, it must not look usable. This is a project about not
-faking completion; the UI should hold the same line.
-
 ## Documentation
 
 - [README.zh-CN.md](./README.zh-CN.md)
