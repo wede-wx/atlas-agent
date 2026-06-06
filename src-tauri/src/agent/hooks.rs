@@ -302,17 +302,30 @@ async fn run_one(hook: &HookConfig, ctx: &AgentHookContext) -> HookRun {
 
     let stdout_handle = child.stdout.take();
     let stderr_handle = child.stderr.take();
+    let stdout_task = tokio::spawn(async move {
+        let mut stdout_buf = String::new();
+        if let Some(mut h) = stdout_handle {
+            let _ = h.read_to_string(&mut stdout_buf).await;
+        }
+        stdout_buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut stderr_buf = String::new();
+        if let Some(mut h) = stderr_handle {
+            let _ = h.read_to_string(&mut stderr_buf).await;
+        }
+        stderr_buf
+    });
+
     let timeout_dur = Duration::from_millis(hook.timeout_ms);
     let result = timeout(timeout_dur, child.wait()).await;
 
-    let mut stdout_buf = String::new();
-    let mut stderr_buf = String::new();
-    if let Some(mut h) = stdout_handle {
-        let _ = h.read_to_string(&mut stdout_buf).await;
+    if result.is_err() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
     }
-    if let Some(mut h) = stderr_handle {
-        let _ = h.read_to_string(&mut stderr_buf).await;
-    }
+    let stdout_buf = stdout_task.await.unwrap_or_default();
+    let stderr_buf = stderr_task.await.unwrap_or_default();
     let stdout_tail = mask_hook_output(&tail(&stdout_buf, TAIL_LIMIT));
     let stderr_tail = mask_hook_output(&tail(&stderr_buf, TAIL_LIMIT));
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -344,7 +357,6 @@ async fn run_one(hook: &HookConfig, ctx: &AgentHookContext) -> HookRun {
             },
         ),
         Err(_) => {
-            let _ = child.kill().await;
             let reason = format!("hook timed out after {}ms", hook.timeout_ms);
             let outcome = match hook.on_failure {
                 HookFailureBehavior::Block => HookOutcome::Block { reason },
@@ -367,10 +379,17 @@ async fn run_one(hook: &HookConfig, ctx: &AgentHookContext) -> HookRun {
 }
 
 fn tail(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
+    let char_count = text.chars().count();
+    if char_count <= limit {
         text.to_string()
     } else {
-        text[text.len() - limit..].to_string()
+        let start_char = char_count - limit;
+        let start_byte = text
+            .char_indices()
+            .nth(start_char)
+            .map(|(idx, _)| idx)
+            .unwrap_or(text.len());
+        text[start_byte..].to_string()
     }
 }
 
@@ -526,6 +545,31 @@ command = "exit 0"
         assert!(matches!(runs[0].outcome, HookOutcome::Pass));
     }
 
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn run_one_drains_large_stdout_while_waiting() {
+        let hook = HookConfig {
+            event: AgentHookKind::AfterCommand,
+            matcher: None,
+            command:
+                r#"powershell -NoProfile -Command "$s='x' * 200000; [Console]::Out.Write($s)""#
+                    .to_string(),
+            timeout_ms: 5_000,
+            on_failure: HookFailureBehavior::Warn,
+        };
+        let ctx = AgentHookContext::new(AgentHookKind::AfterCommand, "run-1");
+
+        let run = run_one(&hook, &ctx).await;
+
+        assert!(
+            matches!(run.outcome, HookOutcome::Pass),
+            "large stdout hook should pass without pipe deadlock: {run:?}"
+        );
+        assert_eq!(run.exit_code, Some(0));
+        assert!(!run.timed_out);
+        assert!(!run.stdout_tail.is_empty());
+    }
+
     #[tokio::test]
     async fn dispatch_block_on_failure_yields_block() {
         let body = if cfg!(target_os = "windows") {
@@ -608,5 +652,11 @@ command = "printf '%s\n' '{secret}'"
             runs[0].stdout_tail
         );
         assert!(runs[0].stdout_tail.contains("[REDACTED:anthropic_api_key]"));
+    }
+
+    #[test]
+    fn tail_handles_multibyte_utf8_without_panic() {
+        assert_eq!(tail("错误输出：中文中文中文", 4), "中文中文");
+        assert_eq!(tail("hook failed 🚧🚧🚧", 3), "🚧🚧🚧");
     }
 }
