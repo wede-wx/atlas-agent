@@ -77,8 +77,6 @@ ATLAS_CODE_REVIEW_COMMAND.md  项目自身的代码审查清单(用 Atlas 审查
 - [CONTRIBUTING.md](./CONTRIBUTING.md)
 - [docs/COMMAND_BRIDGE.md](./docs/COMMAND_BRIDGE.md) — UI 对接后端所需的一切(核心命令 + `agent-event` 事件流)。
 
-有一条铁律:**不准假按钮。** 一个控件如果没有真实调用某个后端命令,就不能看起来像能用的。这是一个关于"不假装完成"的项目,UI 也应该守同一条线。
-
 ## 文档
 
 - [README.md](./README.md)(英文)
@@ -90,4 +88,4 @@ ATLAS_CODE_REVIEW_COMMAND.md  项目自身的代码审查清单(用 Atlas 审查
 
 ## 许可证
 
-[Apache-2.0](./LICENSE)。注意:Apache-2.0 是允许商用的。如果你想限制商用,需要换一个不同的许可证(比如 AGPL-3.0——保持开源,但要求修改版/网络服务版也必须开放源码;或者非商用的源码可见许可证——后者不属于"开源"范畴)。
+[Apache-2.0](./LICENSE)。
