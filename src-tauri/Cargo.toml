@@ -39,5 +39,12 @@ chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 regex = "1.10"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Step 3：Landlock 文件系统沙箱（内核 ≥5.13；纯 Rust、无特权、零外部依赖）。
+landlock = "0.4"
+
 [dev-dependencies]
 tempfile = "3"
+# Step 4：瞬态重试测试用 start_paused 让退避 sleep 零等待自动推进。
+# tokio 的 `full` 不含 test-util，必须在 dev 侧显式开启（零运行时影响）。
+tokio = { version = "1.40", features = ["full", "test-util"] }

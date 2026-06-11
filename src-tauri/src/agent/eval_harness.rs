@@ -19,6 +19,8 @@ const SECURITY_SUITE: &str = include_str!("eval_suites/security_attacks.json");
 const FALSE_COMPLETION_SUITE: &str = include_str!("eval_suites/false_completion.json");
 const ROLLBACK_SUITE: &str = include_str!("eval_suites/rollback.json");
 const PROVIDER_COMPAT_SUITE: &str = include_str!("eval_suites/provider_compat.json");
+/// Step 6：五步加固闸的回归套件——每个 case 绑定对应步交付的确定性测试。
+const ATLAS_GATES_SUITE: &str = include_str!("eval_suites/atlas_gates.json");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -198,6 +200,7 @@ pub fn builtin_eval_suites() -> Result<Vec<EvalSuite>, String> {
         ("false_completion", FALSE_COMPLETION_SUITE),
         ("rollback", ROLLBACK_SUITE),
         ("provider_compat", PROVIDER_COMPAT_SUITE),
+        ("atlas_gates", ATLAS_GATES_SUITE),
     ];
     let mut parsed = Vec::new();
     for (name, text) in suites {
@@ -318,7 +321,7 @@ pub fn validate_eval_suite(suite: &EvalSuite) -> Result<(), Vec<String>> {
                 );
             }
         }
-        "security_attacks" | "false_completion" | "rollback" => {}
+        "security_attacks" | "false_completion" | "rollback" | "atlas_gates" => {}
         other => errors.push(format!("unknown suite kind: {other}")),
     }
 
@@ -993,7 +996,7 @@ mod tests {
     #[test]
     fn builtin_eval_suites_are_valid() {
         let suites = builtin_eval_suites().unwrap();
-        assert_eq!(suites.len(), 5);
+        assert_eq!(suites.len(), 6);
     }
 
     #[test]
@@ -1006,6 +1009,40 @@ mod tests {
             .required_tags
             .iter()
             .any(|tag| tag == "real_verification"));
+    }
+
+    #[test]
+    fn atlas_gates_suite_pins_every_hardening_step() {
+        // Step 6：套件本身也要被钉死——出口闸必须是 1.0 全绿（用例全部绑定
+        // 确定性测试，红了就是闸回归，不存在"模型不稳定"的借口），且五步
+        // 对应的关键 tag 一个都不能少。
+        let suite = builtin_eval_suite("atlas_gates_suite").unwrap();
+        assert!(suite.cases.len() >= 10);
+        assert_eq!(suite.exit_gate.min_pass_rate, 1.0);
+        assert_eq!(suite.exit_gate.max_false_completion_rate, 0.0);
+        assert!(suite.exit_gate.require_all_critical);
+        for tag in [
+            "contract_channel",
+            "deviation_approval",
+            "done_gate",
+            "sandbox",
+        ] {
+            assert!(
+                suite.exit_gate.required_tags.iter().any(|t| t == tag),
+                "required tag {tag} missing from exit gate"
+            );
+        }
+        // 每个 case 的 verifier 命令都必须指向真实的 cargo test 过滤器。
+        for case in &suite.cases {
+            assert!(
+                case.verifier
+                    .commands
+                    .iter()
+                    .all(|cmd| cmd.command.starts_with("cargo test --lib ")),
+                "{} must verify via deterministic cargo tests",
+                case.id
+            );
+        }
     }
 
     #[test]

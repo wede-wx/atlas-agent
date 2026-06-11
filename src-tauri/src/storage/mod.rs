@@ -107,6 +107,10 @@ pub struct PersonalityProgressRecord {
     pub updated_at: i64,
 }
 
+/// P1-1 / Step 4：启动 reconcile 给异常中断 run 写入的哨兵 error。
+/// Step 4 的中断交接据此识别「上次异常中断」（区别于用户主动取消）。
+pub const INTERRUPTED_RUN_ERROR_SENTINEL: &str = "应用关闭或运行时重启，任务已中断。";
+
 const AGENT_TOOL_AUDIT_RETENTION_ROWS: i64 = 2000;
 /// P0-4: cap on retained permission-decision rows (mirrors the tool-audit cap).
 const PERMISSION_DECISION_RETENTION_ROWS: i64 = 2000;
@@ -2593,6 +2597,13 @@ impl LocalDb {
             json!(now),
         )?;
         self.set_app_state(&format!("session_summary:{session_id}"), json!(null))?;
+        // A6: clearing context restarts the conversation. The frozen Goal
+        // Contract belongs to the cleared context; keeping it armed against
+        // the fresh one would gate actions on a stale agreement.
+        self.clear_goal_contract(session_id)?;
+        // B1: approvals share the contract's lifecycle — they approved
+        // deviations *from that contract* and die with it.
+        self.clear_deviation_approvals(session_id)?;
         Ok(now)
     }
 
@@ -3262,6 +3273,60 @@ impl LocalDb {
             serde_json::to_value(&summary)?,
         )?;
         Ok(summary)
+    }
+
+    /// A6: persist the frozen Atlas Goal Contract for a session. The value is
+    /// the serde_json serialization of `agent::atlas_harness::GoalContract`;
+    /// storage deliberately stays agnostic of the agent types (it takes/returns
+    /// `serde_json::Value`) so the dependency direction agent → storage is
+    /// preserved. Serialization/deserialization happens at the caller.
+    pub fn save_goal_contract(
+        &self,
+        session_id: &str,
+        contract: serde_json::Value,
+    ) -> StorageResult<()> {
+        self.set_app_state(&atlas_goal_contract_key(session_id), contract)
+    }
+
+    /// A6: load the persisted Goal Contract for a session, if any. A stored
+    /// JSON `null` (the cleared state) reads back as `None`.
+    pub fn load_goal_contract(&self, session_id: &str) -> StorageResult<Option<serde_json::Value>> {
+        Ok(self
+            .get_app_state(&atlas_goal_contract_key(session_id))?
+            .filter(|value| !value.is_null()))
+    }
+
+    /// A6: clear the persisted Goal Contract (same null-out pattern as
+    /// `session_summary` clearing).
+    pub fn clear_goal_contract(&self, session_id: &str) -> StorageResult<()> {
+        self.set_app_state(&atlas_goal_contract_key(session_id), json!(null))
+    }
+
+    /// B1: persist the user-approved deviation set for a session. Storage
+    /// stays agnostic of the harness types (Value in / Value out), same as
+    /// the Goal Contract helpers.
+    pub fn save_deviation_approvals(
+        &self,
+        session_id: &str,
+        approvals: serde_json::Value,
+    ) -> StorageResult<()> {
+        self.set_app_state(&atlas_deviation_approvals_key(session_id), approvals)
+    }
+
+    /// B1: load the persisted approval set, if any. A stored JSON `null`
+    /// (the cleared state) reads back as `None`.
+    pub fn load_deviation_approvals(
+        &self,
+        session_id: &str,
+    ) -> StorageResult<Option<serde_json::Value>> {
+        Ok(self
+            .get_app_state(&atlas_deviation_approvals_key(session_id))?
+            .filter(|value| !value.is_null()))
+    }
+
+    /// B1: clear the persisted approval set.
+    pub fn clear_deviation_approvals(&self, session_id: &str) -> StorageResult<()> {
+        self.set_app_state(&atlas_deviation_approvals_key(session_id), json!(null))
     }
 
     pub fn summarize_session(&self, session_id: &str) -> StorageResult<SessionSummary> {
@@ -4086,9 +4151,9 @@ impl LocalDb {
              SET status = 'cancelled',
                  updated_at = ?1,
                  finished_at = COALESCE(finished_at, ?1),
-                 error = COALESCE(error, '应用关闭或运行时重启，任务已中断。')
+                 error = COALESCE(error, ?2)
              WHERE status IN ('running', 'paused')",
-            params![now],
+            params![now, INTERRUPTED_RUN_ERROR_SENTINEL],
         )?;
         conn.execute(
             "UPDATE agent_run_steps
@@ -4102,13 +4167,14 @@ impl LocalDb {
                AND run_id IN (
                    SELECT id FROM agent_runs
                    WHERE status = 'cancelled'
-                     AND error = '应用关闭或运行时重启，任务已中断。'
+                     AND error = ?3
                )",
             params![
                 now,
                 serde_json::to_string(&json!({
                     "summary": "应用关闭或运行时重启，步骤已中断。"
-                }))?
+                }))?,
+                INTERRUPTED_RUN_ERROR_SENTINEL
             ],
         )?;
         conn.execute(
@@ -4195,6 +4261,26 @@ impl LocalDb {
             let rows = stmt.query_map(params![limit], agent_run_from_row)?;
             collect_rows(rows)
         }
+    }
+
+    /// Step 4：取某 session 最新创建的一条 run。中断交接只在「最新 run 恰好
+    /// 是被 reconcile 标记为异常中断」时触发一次——新 run 一旦创建它就不再是
+    /// 最新，天然防止交接提示无限重复，零额外状态。
+    pub fn latest_agent_run_for_session(
+        &self,
+        session_id: &str,
+    ) -> StorageResult<Option<AgentRunRecord>> {
+        let conn = self.conn.lock().expect("local db mutex poisoned");
+        let record = conn
+            .query_row(
+                "SELECT id, session_id, status, permission_mode, created_at, updated_at, finished_at, error
+                 FROM agent_runs WHERE session_id = ?1
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![session_id],
+                agent_run_from_row,
+            )
+            .optional()?;
+        Ok(record)
     }
 
     pub fn get_agent_run(&self, run_id: &str) -> StorageResult<Option<AgentRunRecord>> {
@@ -5632,7 +5718,7 @@ impl LocalDb {
             sandbox_backend: sandbox_backend.clone(),
             sandbox_status: if fallback_reason.is_some() {
                 "fallback_recorded".to_string()
-            } else if sandbox_backend == "local" {
+            } else if sandbox_backend == "local" || sandbox_backend == "boundary_only" {
                 "boundary_only".to_string()
             } else {
                 "ready".to_string()
@@ -8104,6 +8190,20 @@ fn session_summary_key(session_id: &str) -> String {
     format!("session_summary:{session_id}")
 }
 
+/// A6: app_state key for the frozen Atlas Goal Contract of one session.
+/// Mirrors the `session_summary:{session_id}` per-session JSON-blob pattern —
+/// no new table, no schema migration.
+fn atlas_goal_contract_key(session_id: &str) -> String {
+    format!("atlas_goal_contract:{session_id}")
+}
+
+/// B1: app_state key for user-approved Atlas deviations of one session.
+/// Same per-session JSON-blob pattern; value is an array of
+/// `{ "item_id": ..., "target": ... }` objects.
+fn atlas_deviation_approvals_key(session_id: &str) -> String {
+    format!("atlas_deviation_approvals:{session_id}")
+}
+
 fn normalize_date(date: &str) -> String {
     let trimmed = date.trim();
     if trimmed.is_empty() {
@@ -8493,6 +8593,11 @@ fn normalize_sandbox_backend(value: Option<&str>) -> String {
         Some("namespace") => "namespace".to_string(),
         Some("container") => "container".to_string(),
         Some("external") => "external".to_string(),
+        // Step 3：真实 OS 后端。不在白名单里它们会被吞成 "local"，
+        // DB 里记录的就不再是真话。
+        Some("landlock") => "landlock".to_string(),
+        Some("seatbelt") => "seatbelt".to_string(),
+        Some("boundary_only") => "boundary_only".to_string(),
         Some(_) => "local".to_string(),
     }
 }
@@ -11018,6 +11123,63 @@ mod tests {
     }
 
     #[test]
+    fn goal_contract_round_trips_per_session() {
+        // A6: contract persists per session_id and reads back intact.
+        let db = temp_db();
+        let s1 = db.create_session("契约会话一").unwrap();
+        let s2 = db.create_session("契约会话二").unwrap();
+        let contract = json!({
+            "goal": "ship X",
+            "frozen": true,
+            "preserve": [{ "id": "P1", "text": "keep src/ui/**", "kind": "layout_structure", "path_glob": "src/ui/**" }],
+        });
+        db.save_goal_contract(&s1.id, contract.clone()).unwrap();
+
+        assert_eq!(db.load_goal_contract(&s1.id).unwrap(), Some(contract));
+        // Sessions are isolated; an unknown/other session reads None.
+        assert_eq!(db.load_goal_contract(&s2.id).unwrap(), None);
+        assert_eq!(db.load_goal_contract("missing-session").unwrap(), None);
+    }
+
+    #[test]
+    fn deviation_approvals_round_trip_and_share_contract_lifecycle() {
+        // B1：批准集按 session 存取往返；clear_session_context 与契约一同清掉。
+        let db = temp_db();
+        let session = db.create_session("批准会话").unwrap();
+        let approvals = json!([
+            { "item_id": "P1", "target": "path:src/ui/App.tsx" }
+        ]);
+        db.save_deviation_approvals(&session.id, approvals.clone())
+            .unwrap();
+        assert_eq!(
+            db.load_deviation_approvals(&session.id).unwrap(),
+            Some(approvals)
+        );
+        assert_eq!(db.load_deviation_approvals("missing").unwrap(), None);
+
+        db.clear_session_context(&session.id).unwrap();
+        assert_eq!(db.load_deviation_approvals(&session.id).unwrap(), None);
+    }
+
+    #[test]
+    fn goal_contract_cleared_explicitly_and_by_context_clear() {
+        // A6 lifecycle: an explicit clear and a session context clear both
+        // null the contract out, and a nulled contract reads back as None.
+        let db = temp_db();
+        let session = db.create_session("契约会话").unwrap();
+        let contract = json!({ "goal": "ship X", "frozen": true });
+
+        db.save_goal_contract(&session.id, contract.clone())
+            .unwrap();
+        db.clear_goal_contract(&session.id).unwrap();
+        assert_eq!(db.load_goal_contract(&session.id).unwrap(), None);
+
+        db.save_goal_contract(&session.id, contract).unwrap();
+        db.clear_session_context(&session.id).unwrap();
+        assert_eq!(db.load_goal_contract(&session.id).unwrap(), None);
+    }
+
+    #[test]
     fn session_summary_compacts_older_messages() {
         let db = temp_db();
         let session = db.create_session("Long chat").unwrap();
@@ -11211,6 +11373,32 @@ mod tests {
         assert!(records
             .iter()
             .all(|record| record.reason != "{\"path\":\"secret.txt\"}"));
+    }
+
+    #[test]
+    fn latest_run_for_session_sees_reconciled_interruption() {
+        // Step 4：reconcile 后,session 最新 run 携带哨兵 error,可被交接逻辑识别。
+        let db = temp_db();
+        let session = db.create_session("中断会话").unwrap();
+        db.create_agent_run("run-old", Some(&session.id), "default")
+            .unwrap();
+        db.update_agent_run_status("run-old", "finished", None)
+            .unwrap();
+        db.create_agent_run("run-dead", Some(&session.id), "default")
+            .unwrap();
+
+        db.mark_interrupted_agent_runs().unwrap();
+
+        let latest = db
+            .latest_agent_run_for_session(&session.id)
+            .unwrap()
+            .expect("latest run exists");
+        assert_eq!(latest.id, "run-dead");
+        assert_eq!(latest.status, "cancelled");
+        assert_eq!(
+            latest.error.as_deref(),
+            Some(INTERRUPTED_RUN_ERROR_SENTINEL)
+        );
     }
 
     #[test]

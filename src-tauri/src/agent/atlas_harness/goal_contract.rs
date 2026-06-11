@@ -197,6 +197,62 @@ impl GoalContract {
             diagnostics: diags,
         }
     }
+
+    /// 契约结构化通道（Step 1）：从结构化 JSON（`atlas_freeze_goal_contract`
+    /// 工具的参数）解析契约。这是对 REVIEW_FINDINGS 第 7 条的地基级修复——
+    /// 不再从自由文本里刮标题，模型通过专用工具调用提交结构化契约。
+    ///
+    /// 语义与 `parse_from_skill_block` 严格对齐：容错（坏条目记 diagnostics
+    /// 不抛错）、`hard` 拿不准就当 true、缺 id 自动补、最后注入默认 guards。
+    /// 文本通道保留为后备（模型不调工具时仍按旧路径抽取）。
+    pub fn from_structured(value: &serde_json::Value) -> ParseResult {
+        let mut c = GoalContract::default();
+        let mut diags: Vec<String> = Vec::new();
+
+        c.goal = value
+            .get("goal")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string();
+        if c.goal.is_empty() {
+            diags.push("structured contract has no goal".to_string());
+        }
+
+        structured_items(value, "must_do", "M", &mut c.must_do, &mut diags);
+        structured_items(value, "must_not_do", "N", &mut c.must_not_do, &mut diags);
+        structured_items(value, "constraints", "C", &mut c.constraints, &mut diags);
+        structured_items(
+            value,
+            "acceptance_criteria",
+            "A",
+            &mut c.acceptance_criteria,
+            &mut diags,
+        );
+        structured_preserve(value, &mut c.preserve, &mut diags);
+
+        // scope：顶层 in_scope/out_of_scope 与嵌套 scope.{in_scope,out_of_scope} 都认。
+        let scope_node = value.get("scope");
+        c.scope.in_scope = structured_strings(value, scope_node, "in_scope");
+        c.scope.out_of_scope = structured_strings(value, scope_node, "out_of_scope");
+
+        // reference fidelity：与文本通道一致，存在布局项即视为有参考，且布局优先。
+        let reference_node = value
+            .get("reference")
+            .or_else(|| value.get("reference_fidelity"));
+        c.reference_fidelity.layout_structure =
+            structured_strings(value, reference_node, "layout_structure");
+        c.reference_fidelity.style = structured_strings(value, reference_node, "style");
+        c.reference_fidelity.has_reference = !c.reference_fidelity.layout_structure.is_empty()
+            || !c.reference_fidelity.style.is_empty();
+        c.reference_fidelity.layout_over_style = !c.reference_fidelity.layout_structure.is_empty();
+
+        c.inject_default_guards();
+        ParseResult {
+            contract: c,
+            diagnostics: diags,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -379,6 +435,141 @@ fn extract_quoted(meta: &str, keys: &[&str]) -> Option<String> {
         }
     }
     extract_field(meta, keys)
+}
+
+/// 结构化通道：解析一个契约项数组（对象或纯字符串都容忍）。
+/// 与文本通道同语义：text 缺失记 diagnostic 跳过；id 缺失按 `{前缀}{序号}` 补；
+/// hard 缺失默认 true（“拿不准就当硬”）。
+fn structured_items(
+    value: &serde_json::Value,
+    key: &str,
+    id_prefix: &str,
+    into: &mut Vec<ContractItem>,
+    diags: &mut Vec<String>,
+) {
+    let Some(items) = value.get(key).and_then(|v| v.as_array()) else {
+        return;
+    };
+    for (index, item) in items.iter().enumerate() {
+        let (text, id, hard, source_quote, verify) = match item {
+            serde_json::Value::String(text) => (text.trim().to_string(), None, true, None, None),
+            serde_json::Value::Object(_) => (
+                item.get("text")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .to_string(),
+                item.get("id")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string),
+                item.get("hard").and_then(|v| v.as_bool()).unwrap_or(true),
+                item.get("source_quote")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                item.get("verify")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            ),
+            other => {
+                diags.push(format!("could not parse structured {key} item: {other}"));
+                continue;
+            }
+        };
+        if text.is_empty() {
+            diags.push(format!("structured {key} item {} has no text", index + 1));
+            continue;
+        }
+        into.push(ContractItem {
+            id: id.unwrap_or_else(|| format!("{id_prefix}{}", index + 1)),
+            text,
+            hard,
+            source_quote,
+            verify,
+        });
+    }
+}
+
+/// 结构化通道：解析 preserve 数组。kind 接受 snake_case 枚举字符串
+/// （behavior/layout_structure/api_contract/scope/data/file），不认识的值
+/// 回落到与文本通道相同的关键词推断；File/LayoutStructure 在缺 path_glob
+/// 时尝试从 text 提取路径模式。
+fn structured_preserve(
+    value: &serde_json::Value,
+    into: &mut Vec<PreserveItem>,
+    diags: &mut Vec<String>,
+) {
+    let Some(items) = value.get("preserve").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for (index, item) in items.iter().enumerate() {
+        let text = item
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string();
+        if text.is_empty() {
+            diags.push(format!(
+                "structured preserve item {} has no text",
+                index + 1
+            ));
+            continue;
+        }
+        let kind_raw = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        let kind =
+            serde_json::from_value::<PreserveKind>(serde_json::Value::String(kind_raw.to_string()))
+                .unwrap_or_else(|_| infer_preserve_kind(&text, kind_raw));
+        let path_glob = item
+            .get("path_glob")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                if matches!(kind, PreserveKind::File | PreserveKind::LayoutStructure) {
+                    extract_path_glob(&text)
+                } else {
+                    None
+                }
+            });
+        into.push(PreserveItem {
+            id: item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("P{}", index + 1)),
+            text,
+            kind,
+            path_glob,
+        });
+    }
+}
+
+/// 结构化通道：读字符串数组，顶层 key 与嵌套节点（scope/reference）下的同名
+/// key 都认，顶层优先。
+fn structured_strings(
+    value: &serde_json::Value,
+    nested: Option<&serde_json::Value>,
+    key: &str,
+) -> Vec<String> {
+    let node = value
+        .get(key)
+        .or_else(|| nested.and_then(|nested| nested.get(key)));
+    node.and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn finalize_reference_fidelity(contract: &mut GoalContract, source: &str) {
@@ -583,5 +774,77 @@ Acceptance:
         let text = "Goal:\n- x\nConstraints:\n- [C1] prefer tailwind if possible (soft)";
         let c = GoalContract::parse_from_skill_block(text).contract;
         assert!(!c.constraints[0].hard);
+    }
+
+    #[test]
+    fn structured_parse_mirrors_text_channel_semantics() {
+        // Step 1（契约结构化通道）：结构化入口与文本入口语义一致——
+        // id 自动补、hard 默认 true、默认 guards 注入、布局优先。
+        let args = serde_json::json!({
+            "goal": "按参考图实现落地页",
+            "must_do": [
+                { "id": "M1", "text": "完整实现页面", "hard": true, "source_quote": "完整实现" },
+                { "text": "补充移动端适配" }
+            ],
+            "constraints": [ { "text": "prefer tailwind if possible", "hard": false } ],
+            "preserve": [
+                { "id": "P1", "text": "三栏栅格布局 src/ui/**", "kind": "layout_structure", "path_glob": "src/ui/**" }
+            ],
+            "in_scope": ["src/ui"],
+            "out_of_scope": ["backend"],
+            "reference": { "layout_structure": ["三栏栅格"], "style": ["靛蓝配色"] }
+        });
+        let r = GoalContract::from_structured(&args);
+        assert!(r.is_usable());
+        let c = r.contract;
+        assert_eq!(c.must_do[0].id, "M1");
+        assert_eq!(c.must_do[0].source_quote.as_deref(), Some("完整实现"));
+        assert_eq!(c.must_do[1].id, "M2", "missing id is auto-assigned");
+        assert!(c.must_do[1].hard, "hard defaults to true");
+        assert!(!c.constraints[0].hard);
+        assert_eq!(c.preserve[0].kind, PreserveKind::LayoutStructure);
+        assert_eq!(c.preserve[0].path_glob.as_deref(), Some("src/ui/**"));
+        assert_eq!(c.scope.in_scope, vec!["src/ui".to_string()]);
+        assert_eq!(c.scope.out_of_scope, vec!["backend".to_string()]);
+        assert!(c.reference_fidelity.has_reference);
+        assert!(c.reference_fidelity.layout_over_style);
+        // 默认 guards 注入（背叛防线在结构化通道同样成立）。
+        assert!(c.must_not_do.iter().any(|i| i.id == "N-hide"));
+        assert!(c.has_hard_constraints());
+        assert!(!c.frozen, "freeze happens at install, not at parse");
+    }
+
+    #[test]
+    fn structured_parse_is_tolerant_and_diagnosed() {
+        // 容错语义：缺 goal / 坏条目 / 不认识的 kind 都不抛错，记 diagnostics。
+        let args = serde_json::json!({
+            "must_do": [ { "hard": true }, "plain string item", 42 ],
+            "preserve": [ { "text": "保持 布局 结构", "kind": "??" } ]
+        });
+        let r = GoalContract::from_structured(&args);
+        assert!(!r.is_usable(), "missing goal must not be usable");
+        assert!(r.diagnostics.iter().any(|d| d.contains("no goal")));
+        assert!(r.diagnostics.iter().any(|d| d.contains("has no text")));
+        assert!(r.diagnostics.iter().any(|d| d.contains("could not parse")));
+        // 纯字符串条目被接受。
+        assert_eq!(r.contract.must_do.len(), 1);
+        assert_eq!(r.contract.must_do[0].text, "plain string item");
+        // 不认识的 kind 回落到关键词推断（“布局/结构”→ LayoutStructure）。
+        assert_eq!(r.contract.preserve[0].kind, PreserveKind::LayoutStructure);
+    }
+
+    #[test]
+    fn structured_contract_round_trips_through_persistence_shape() {
+        // 结构化解析 → 冻结 → serde 往返（A6 持久化形态）→ 字段完整。
+        let args = serde_json::json!({
+            "goal": "ship X",
+            "preserve": [ { "text": "keep src/ui/**", "kind": "file", "path_glob": "src/ui/**" } ]
+        });
+        let mut contract = GoalContract::from_structured(&args).contract;
+        contract.freeze();
+        let json = serde_json::to_value(&contract).unwrap();
+        let restored: GoalContract = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, contract);
+        assert!(restored.frozen);
     }
 }

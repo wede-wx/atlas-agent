@@ -1047,6 +1047,15 @@ async fn run_agent(
     if !should_auto_apply_skills(&state.local_db, &message) {
         skill_snapshot.registry = SkillRegistry::default();
     }
+    // Step 4（中断交接）：必须在 create_agent_run 之前判定——新 run 一旦
+    // 入库，被中断的 run 就不再是 session 最新，注记自然只发一次。
+    let interruption_handoff = event_session_id
+        .as_deref()
+        .and_then(|session_id| build_interruption_handoff_note(&state.local_db, session_id));
+    let mut history = history;
+    if let Some(note) = interruption_handoff {
+        history.push(Message::plain(Role::System, note));
+    }
     state
         .local_db
         .create_agent_run(&run_id, event_session_id.as_deref(), &permission_mode)
@@ -1058,7 +1067,9 @@ async fn run_agent(
                 session_id: event_session_id.clone(),
                 run_id: Some(run_id.clone()),
                 root_path: root.to_string_lossy().to_string(),
-                sandbox_backend: Some("local".to_string()),
+                // Step 3：记录真实探测到的后端（landlock/seatbelt/boundary_only），
+                // 不再硬编码 "local"——DB 里的沙箱状态从此是事实。
+                sandbox_backend: Some(crate::tools::SandboxBackend::detect().as_str().to_string()),
                 setup_script: None,
             },
         ) {
@@ -1179,12 +1190,103 @@ async fn run_agent(
     let verify_db = state.local_db.clone();
     let verify_session = event_session_id.clone();
     let verify_root = project_root.clone();
+    // A6: captures for the Goal Contract persist sink (write side) and the
+    // rehydration load (read side). The contract is keyed by session_id in the
+    // app_state table; runs without a session id neither persist nor restore.
+    let contract_db = state.local_db.clone();
+    let contract_session = event_session_id.clone();
+    // Step 5: captures for the done-gate evidence provider (CompletionGate +
+    // independent Verifier). Gathers task facts from storage, passed
+    // verification ids, and a truncated `git diff` from the project root.
+    let completion_db = state.local_db.clone();
+    let completion_root = project_root.clone();
+    let restored_goal_contract = event_session_id.as_deref().and_then(|session_id| {
+        state
+            .local_db
+            .load_goal_contract(session_id)
+            .ok()
+            .flatten()
+            .and_then(|value| {
+                serde_json::from_value::<crate::agent::atlas_harness::GoalContract>(value).ok()
+            })
+            // Only a frozen contract is a confirmed execution baseline; anything
+            // else in storage is treated as absent (fail-closed for restore —
+            // the model can still print a fresh contract this run).
+            .filter(|contract| contract.frozen)
+    });
     let mut agent = Agent::new(llm_client, tool_registry)
         .with_tools_enabled(true)
         .with_tool_access_policy(tool_access_policy)
         .with_subagent_role(subagent_role)
         .with_tool_audit_sink(audit_sink)
         .with_usage_sink(usage_sink)
+        .with_completion_evidence_provider(move |task_id: String| {
+            let db = completion_db.clone();
+            let root = completion_root.clone();
+            async move {
+                const DIFF_CAP_CHARS: usize = 20_000;
+                let task = db.get_plan_task(&task_id).ok()?;
+                let passed_verification_ids: Vec<String> = db
+                    .list_task_verifications(&task_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|record| record.status.eq_ignore_ascii_case("passed"))
+                    .map(|record| record.id)
+                    .collect();
+                // 验证证据：通过的验证命令 + 任务自报 evidence（标注为自报）。
+                let mut test_evidence = String::new();
+                for record in db.list_task_verifications(&task_id).unwrap_or_default() {
+                    test_evidence.push_str(&format!(
+                        "- [{}] {} (exit={:?})\n",
+                        record.status, record.command, record.exit_code
+                    ));
+                }
+                if !task.evidence.is_null() {
+                    test_evidence
+                        .push_str(&format!("自报 evidence（未独立验证）：{}\n", task.evidence));
+                }
+                // diff：项目根可用时取 `git diff`，截断控成本；取不到给空——
+                // Verifier 的 prompt 对空 diff 有自己的保守姿态。
+                let diff = match root.as_deref() {
+                    Some(root_path) => tokio::process::Command::new("git")
+                        .args(["diff"])
+                        .current_dir(root_path)
+                        .output()
+                        .await
+                        .ok()
+                        .map(|output| {
+                            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                            if text.chars().count() > DIFF_CAP_CHARS {
+                                text = text.chars().take(DIFF_CAP_CHARS).collect::<String>()
+                                    + "\n…（diff 已截断）";
+                            }
+                            text
+                        })
+                        .unwrap_or_default(),
+                    None => String::new(),
+                };
+                let task_text = format!("{} {}", task.title, task.acceptance_criteria);
+                Some(crate::agent::CompletionEvidenceFacts {
+                    evidence_status: task.evidence_status,
+                    passed_verification_ids,
+                    task_text,
+                    diff,
+                    test_evidence,
+                })
+            }
+        })
+        .with_contract_persist_sink(move |contract| {
+            // A6: persist the frozen Goal Contract the moment it is installed,
+            // keyed by session. Best-effort like the other sinks — a storage
+            // failure must not break the agent loop (the in-memory harness for
+            // this run is already armed either way).
+            let Some(session_id) = contract_session.as_deref() else {
+                return;
+            };
+            if let Ok(value) = serde_json::to_value(contract) {
+                let _ = contract_db.save_goal_contract(session_id, value);
+            }
+        })
         .with_run_id(run_id.clone())
         .with_token_budget_snapshot(token_budget_snapshot)
         .with_guidance_queues(state.run_guidance.clone())
@@ -1253,6 +1355,35 @@ async fn run_agent(
                 crate::tools::run_verify::verify_after_command(&db, &task, root_path).await
             }
         });
+    // A6: rehydrate the persisted Goal Contract before the loop starts, so the
+    // harness stays armed across AgentCore rebuilds (every turn) and app
+    // restarts. With a contract installed, the in-loop extraction
+    // short-circuits via its `need_contract` check — gating semantics and the
+    // freeze-on-print behavior are unchanged.
+    if let Some(contract) = restored_goal_contract {
+        agent.preinstall_goal_contract(contract);
+        // B1: approvals only mean anything relative to an installed contract,
+        // so they rehydrate strictly inside this branch. install replaces the
+        // set — a revocation made between turns takes effect here.
+        let restored_approvals: Vec<AtlasDeviationApproval> = event_session_id
+            .as_deref()
+            .and_then(|session_id| {
+                state
+                    .local_db
+                    .load_deviation_approvals(session_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|value| serde_json::from_value(value).ok())
+            })
+            .unwrap_or_default();
+        if !restored_approvals.is_empty() {
+            agent.preinstall_deviation_approvals(
+                restored_approvals
+                    .into_iter()
+                    .map(|approval| (approval.item_id, approval.target)),
+            );
+        }
+    }
     let cancel_token = CancellationToken::new();
     let cancel_key = cancel_key_for(event_session_id.as_deref());
     let proof_message = message.clone();
@@ -2484,6 +2615,82 @@ pub async fn resolve_permission_confirmation(
         .map_err(|error| error.to_string())
 }
 
+/// B1: a user-approved Atlas deviation — one (violation item, exact action
+/// target) pair. Mirrors the harness approval tuple; serialized into the
+/// per-session `atlas_deviation_approvals` blob.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AtlasDeviationApproval {
+    pub item_id: String,
+    pub target: String,
+}
+
+/// B1: resolve an Atlas ContractGate block from the user side. `approved=true`
+/// adds the (item_id, target) pair to the session's approval set — the next
+/// run downgrades that exact Block to ApprovedDeviation (execute + mechanical
+/// disclosure). `approved=false` removes the pair if present (reject and
+/// revoke share this path) — gate behavior stays/returns to Block.
+///
+/// Both outcomes land in the permission-decision ledger with
+/// `decided_by="user"` (the P1-7 precedent), so every approval/revocation is
+/// replayable and auditable. This command is the ONLY writer of the approval
+/// set; no model-callable tool can reach it.
+#[tauri::command]
+pub async fn resolve_atlas_deviation(
+    session_id: String,
+    item_id: String,
+    target: String,
+    approved: bool,
+    run_id: Option<String>,
+    tool_name: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<AtlasDeviationApproval>, String> {
+    let mut approvals: Vec<AtlasDeviationApproval> = state
+        .local_db
+        .load_deviation_approvals(&session_id)
+        .map_err(|error| error.to_string())?
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+
+    let entry = AtlasDeviationApproval { item_id, target };
+    if approved {
+        if !approvals.contains(&entry) {
+            approvals.push(entry.clone());
+        }
+    } else {
+        approvals.retain(|existing| existing != &entry);
+    }
+    state
+        .local_db
+        .save_deviation_approvals(
+            &session_id,
+            serde_json::to_value(&approvals).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+    let verdict = if approved { "批准" } else { "拒绝/撤销" };
+    state
+        .local_db
+        .log_permission_decision(LogPermissionDecisionPayload {
+            session_id: Some(session_id),
+            run_id: run_id.unwrap_or_else(|| "atlas_deviation".to_string()),
+            iteration: 0,
+            tool_call_id: tool_name.unwrap_or_else(|| "atlas_contract_gate".to_string()),
+            subject: entry.item_id.clone(),
+            action: entry.target.clone(),
+            risk: "atlas_deviation".to_string(),
+            mode: "atlas".to_string(),
+            decision: if approved { "allowed" } else { "denied" }.to_string(),
+            reason: format!(
+                "用户{verdict}契约偏离（条款 {}，目标 {}）",
+                entry.item_id, entry.target
+            ),
+            decided_by: "user".to_string(),
+        })
+        .map_err(|error| error.to_string())?;
+
+    Ok(approvals)
+}
+
 /// P1-6: classify a user message into a structured intent (chat / question /
 /// task / edit / debug / review) with action and clarification flags. Rule-based
 /// and deterministic.
@@ -3177,6 +3384,7 @@ fn persist_agent_event(
         AgentEvent::ResponseStarted { .. }
         | AgentEvent::ResponseDelta { .. }
         | AgentEvent::ResponseFallbackStarted { .. }
+        | AgentEvent::AtlasDeviationBlocked { .. }
         | AgentEvent::FinalAudit { .. } => {}
     }
 }
@@ -3336,6 +3544,54 @@ fn annotate_tool_error_recovery(value: &mut serde_json::Value) {
 
 pub(crate) fn pending_command_message_id(pending_command_id: &str) -> String {
     format!("tool_msg_{pending_command_id}")
+}
+
+/// Step 4（中断交接）：若该 session **最新一条** run 是被启动 reconcile 标记
+/// 的异常中断（哨兵 error），构造一段机械交接注记：中断 run、当时的活跃任务、
+/// 中断前最后几条时间线，并明确指示「先核对落盘状态，不要盲目重做、也不要
+/// 假设已完成」。触发条件天然一次性——新 run 创建后它就不再是最新。
+/// 用户主动取消（无哨兵 error）不触发：用户知道自己取消了什么。
+fn build_interruption_handoff_note(db: &LocalDb, session_id: &str) -> Option<String> {
+    const MAX_STEPS: usize = 5;
+    const MAX_NOTE_CHARS: usize = 1500;
+
+    let run = db.latest_agent_run_for_session(session_id).ok().flatten()?;
+    if run.status != "cancelled"
+        || run.error.as_deref() != Some(crate::storage::INTERRUPTED_RUN_ERROR_SENTINEL)
+    {
+        return None;
+    }
+
+    let mut note = format!(
+        "[中断交接] 上一次运行（{}）被异常中断（应用关闭或运行时重启）。\n",
+        run.id
+    );
+    if let Ok(Some(task)) = db.get_active_plan_task(session_id) {
+        note.push_str(&format!(
+            "中断时活跃任务：{}（status={}，evidence_status={}）。\n",
+            task.title, task.status, task.evidence_status
+        ));
+    }
+    let steps = db.get_agent_run_steps(&run.id).unwrap_or_default();
+    if !steps.is_empty() {
+        note.push_str("中断前最后的时间线：\n");
+        let tail = steps.len().saturating_sub(MAX_STEPS);
+        for step in &steps[tail..] {
+            note.push_str(&format!(
+                "- #{} {}/{}：{}\n",
+                step.step_index, step.step_type, step.status, step.summary
+            ));
+        }
+    }
+    note.push_str(
+        "指示：上面是事实记录，不是完成证据。继续前先核对最后动作的实际落盘状态\
+         （文件是否真的写入、命令是否真的执行、任务证据是否存在），\
+         不要盲目重做已完成的步骤，也不要把未完成的步骤当作已完成。",
+    );
+    if note.chars().count() > MAX_NOTE_CHARS {
+        note = note.chars().take(MAX_NOTE_CHARS).collect::<String>() + "…（已截断）";
+    }
+    Some(note)
 }
 
 fn build_conversation_context(
@@ -4222,6 +4478,48 @@ mod tests {
             .as_nanos();
         LocalDb::open(std::env::temp_dir().join(format!("atlas_agent_context_{unique}.db")))
             .unwrap()
+    }
+
+    #[test]
+    fn interruption_handoff_fires_once_for_reconciled_latest_run() {
+        // Step 4：哨兵中断 + 是最新 run → 出注记;有更新的 run 后 → 不再出。
+        let db = temp_db();
+        let session = db.create_session("交接会话").unwrap();
+        db.create_agent_run("run-dead", Some(&session.id), "default")
+            .unwrap();
+        db.append_agent_run_step(
+            "run-dead",
+            "tool",
+            "running",
+            "edit_file src/ui/App.tsx",
+            serde_json::json!({}),
+            serde_json::json!({}),
+        )
+        .unwrap();
+        db.mark_interrupted_agent_runs().unwrap();
+
+        let note = build_interruption_handoff_note(&db, &session.id)
+            .expect("interrupted latest run must produce a handoff note");
+        assert!(note.contains("run-dead"));
+        assert!(note.contains("edit_file src/ui/App.tsx"));
+        assert!(note.contains("不要盲目重做"));
+
+        // 新 run 入库后,被中断的 run 不再是最新 → 注记停止(天然一次性)。
+        db.create_agent_run("run-next", Some(&session.id), "default")
+            .unwrap();
+        assert!(build_interruption_handoff_note(&db, &session.id).is_none());
+    }
+
+    #[test]
+    fn interruption_handoff_ignores_user_cancelled_runs() {
+        // 用户主动取消没有哨兵 error,不触发「异常中断」交接。
+        let db = temp_db();
+        let session = db.create_session("取消会话").unwrap();
+        db.create_agent_run("run-user-cancel", Some(&session.id), "default")
+            .unwrap();
+        db.update_agent_run_status("run-user-cancel", "cancelled", Some("用户取消"))
+            .unwrap();
+        assert!(build_interruption_handoff_note(&db, &session.id).is_none());
     }
 
     fn audit_payload(status: &str, reason: &str, tool_name: &str) -> LogAgentToolAuditPayload {

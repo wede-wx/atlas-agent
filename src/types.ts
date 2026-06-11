@@ -39,6 +39,11 @@ export interface ToolCall {
   arguments: unknown;
 }
 
+export interface AtlasContractViolation {
+  item_id: string;
+  why: string;
+}
+
 export type AgentRunEvent =
   | { type: "Started"; run: unknown }
   | { type: "Iteration"; run_id: string; iteration: number }
@@ -75,6 +80,7 @@ export type AgentEvent =
   | { type: "UnknownToolRequested"; requested: string; nearest: string | null }
   | { type: "ToolNormalizationApplied"; original_name: string; normalized_name: string; argument_changes: string[] }
   | { type: "FinalAudit"; run_id: string; audit: unknown }
+  | { type: "AtlasDeviationBlocked"; tool_name: string; target: string; reason: string; violations: AtlasContractViolation[] }
   | { type: "RunEvent"; event: AgentRunEvent };
 
 export interface AgentEventEnvelope {

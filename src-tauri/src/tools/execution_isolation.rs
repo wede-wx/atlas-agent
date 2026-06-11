@@ -15,6 +15,10 @@ pub struct ExecutionIsolationConfig {
     pub allowed_command_roots: Vec<String>,
     #[serde(default = "default_command_env_allowlist")]
     pub command_env_allowlist: Vec<String>,
+    /// Step 3：true = fail-closed——OS 沙箱（Landlock/seatbelt）不可用时拒绝
+    /// 执行命令；false（默认）= 降级为策略级边界并在审计中披露。
+    #[serde(default)]
+    pub require_sandbox: bool,
 }
 
 impl Default for ExecutionIsolationConfig {
@@ -23,6 +27,7 @@ impl Default for ExecutionIsolationConfig {
             command_workspace_boundary: true,
             allowed_command_roots: Vec::new(),
             command_env_allowlist: default_command_env_allowlist(),
+            require_sandbox: false,
         }
     }
 }
@@ -33,6 +38,7 @@ pub struct CommandIsolationPolicy {
     default_cwd: PathBuf,
     allowed_roots: Vec<PathBuf>,
     env_allowlist: Vec<String>,
+    require_sandbox: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +51,18 @@ pub struct CommandIsolationReport {
     pub env_policy: String,
     pub injected_env: Vec<String>,
     pub blocked_sensitive_env_count: usize,
+    /// Step 3：实际生效的 OS 沙箱后端（landlock/seatbelt/boundary_only）。
+    #[serde(default = "default_sandbox_backend")]
+    pub sandbox_backend: String,
+    /// Step 3：本次命令是否有 OS 级强制。false 必须可见——诚实披露。
+    #[serde(default)]
+    pub sandbox_enforced: bool,
+    #[serde(default)]
+    pub sandbox_detail: String,
+}
+
+fn default_sandbox_backend() -> String {
+    "boundary_only".to_string()
 }
 
 impl CommandIsolationPolicy {
@@ -71,6 +89,16 @@ impl CommandIsolationPolicy {
             default_cwd,
             allowed_roots: roots,
             env_allowlist: normalized_env_allowlist(&config.command_env_allowlist),
+            require_sandbox: config.require_sandbox,
+        }
+    }
+
+    /// Step 3：把命令边界（allowed_roots）翻译成 OS 沙箱规格——策略级与 OS 级
+    /// 用同一份可写根，两层边界永远一致，不会出现"策略允许、沙箱拒绝"的漂移。
+    pub fn sandbox_spec(&self) -> crate::tools::sandbox::SandboxSpec {
+        crate::tools::sandbox::SandboxSpec {
+            writable_roots: self.allowed_roots.clone(),
+            require_sandbox: self.require_sandbox,
         }
     }
 
@@ -157,6 +185,10 @@ impl CommandIsolationPolicy {
             env_policy: "allowlist".to_string(),
             injected_env,
             blocked_sensitive_env_count,
+            // 占位：执行点（command.rs）拿到真实 SandboxApplication 后覆盖。
+            sandbox_backend: default_sandbox_backend(),
+            sandbox_enforced: false,
+            sandbox_detail: String::new(),
         }
     }
 
@@ -324,6 +356,7 @@ mod tests {
             command_workspace_boundary: true,
             allowed_command_roots: Vec::new(),
             command_env_allowlist: vec!["OPENAI_API_KEY".to_string(), "NORMAL_ENV".to_string()],
+            require_sandbox: false,
         };
         let policy = CommandIsolationPolicy::from_config(&config, &[]);
         let patterns = policy.env_patterns();
@@ -367,6 +400,7 @@ mod tests {
             command_workspace_boundary: true,
             allowed_command_roots: vec![extra.to_string_lossy().to_string()],
             command_env_allowlist: default_command_env_allowlist(),
+            require_sandbox: false,
         };
         let policy = CommandIsolationPolicy::from_config(&config, &[project]);
 

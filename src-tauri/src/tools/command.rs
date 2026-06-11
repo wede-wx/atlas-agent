@@ -4,7 +4,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
 use tokio::sync::mpsc::Sender;
 use tokio::time::timeout;
 
@@ -343,7 +342,10 @@ pub async fn execute_shell_command_streaming_with_policy(
 ) -> Result<CommandExecutionResult, AgentError> {
     ensure_command_allowed(command)?;
     let (cwd, base_isolation_report) = isolation.resolve_cwd(cwd)?;
-    let mut child = shell_command(command);
+    // Step 3：命令一律经 OS 沙箱构造（Landlock/seatbelt；不可用时按配置
+    // 降级或 fail-closed）。可写根与策略层 allowed_roots 同源。
+    let (mut child, sandbox) =
+        crate::tools::sandbox::build_sandboxed_shell(command, &isolation.sandbox_spec())?;
     child.current_dir(&cwd);
     child.stdout(Stdio::piped());
     child.stderr(Stdio::piped());
@@ -351,6 +353,9 @@ pub async fn execute_shell_command_streaming_with_policy(
     let isolation_report = CommandIsolationReport {
         injected_env,
         blocked_sensitive_env_count,
+        sandbox_backend: sandbox.backend.as_str().to_string(),
+        sandbox_enforced: sandbox.enforced,
+        sandbox_detail: sandbox.detail.clone(),
         ..base_isolation_report
     };
     // P1-4: if this future is dropped before the command finishes — the run is
@@ -518,27 +523,6 @@ async fn collect_stream_output(handle: Option<tokio::task::JoinHandle<String>>) 
     }
 }
 
-fn shell_command(command: &str) -> Command {
-    #[cfg(windows)]
-    {
-        let mut child = Command::new("powershell");
-        child.args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            command,
-        ]);
-        child
-    }
-    #[cfg(not(windows))]
-    {
-        let mut child = Command::new("sh");
-        child.args(["-lc", command]);
-        child
-    }
-}
-
 fn shell_label() -> &'static str {
     #[cfg(windows)]
     {
@@ -580,6 +564,25 @@ fn clip_output(value: &str) -> String {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn command_result_reports_actual_sandbox_backend() {
+        // Step 3：每条命令的结果必须如实携带沙箱后端与是否强制——
+        // boundary_only 的 enforced=false 是披露，不是装饰。
+        let command = "echo sandboxed";
+        let result = execute_shell_command(command, None, Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert!(result.stdout.contains("sandboxed"));
+        let detected = crate::tools::sandbox::SandboxBackend::detect();
+        assert_eq!(result.isolation.sandbox_backend, detected.as_str());
+        assert_eq!(
+            result.isolation.sandbox_enforced,
+            detected != crate::tools::sandbox::SandboxBackend::BoundaryOnly,
+            "enforced flag must match the detected backend"
+        );
+        assert!(!result.isolation.sandbox_detail.is_empty());
+    }
 
     #[test]
     fn dangerous_commands_are_blocked() {
@@ -735,6 +738,7 @@ mod tests {
                 "ATLAS_COMMAND_ALLOWED_TEST".to_string(),
                 "ATLAS_COMMAND_SECRET_TOKEN".to_string(),
             ],
+            require_sandbox: false,
         };
         let policy = CommandIsolationPolicy::from_config(&config, std::slice::from_ref(&base));
         let command = if cfg!(windows) {

@@ -75,7 +75,9 @@ impl WorkspaceLifecycleRuntime {
 
     pub fn create(&self, spec: WorkspaceLifecycleSpec) -> StorageResult<WorkspaceLifecycleRecord> {
         let backend = spec.sandbox_backend.as_deref().unwrap_or("local");
-        let fallback_reason = (backend == "local").then_some(
+        // Step 3："local"（旧值）与 "boundary_only"（探测到无 OS 后端）都是
+        // 降级态，必须带 fallback_reason 入库；landlock/seatbelt 是真后端。
+        let fallback_reason = (backend == "local" || backend == "boundary_only").then_some(
             "OS sandbox backend not active; command workspace boundary and env allowlist are enforced"
                 .to_string(),
         );
@@ -429,6 +431,46 @@ mod tests {
             .join(format!("atlas-{label}-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn workspace_lifecycle_records_real_backend_without_fallback() {
+        // Step 3：landlock/seatbelt 是真后端——status=ready、无 fallback_reason；
+        // boundary_only 是降级态——必须带 fallback 入库（诚实披露）。
+        let db = temp_db();
+        let root = temp_root("workspace_real_backend");
+        db.create_agent_run("run-landlock", None, "default")
+            .unwrap();
+        let runtime = WorkspaceLifecycleRuntime::new(db.clone());
+        let record = runtime
+            .create(WorkspaceLifecycleSpec {
+                id: Some("ws-landlock".to_string()),
+                session_id: None,
+                run_id: Some("run-landlock".to_string()),
+                root_path: root.to_string_lossy().to_string(),
+                sandbox_backend: Some("landlock".to_string()),
+                setup_script: None,
+            })
+            .unwrap();
+        assert_eq!(record.sandbox_backend, "landlock");
+        assert_eq!(record.sandbox_status, "ready");
+        assert!(record.fallback_reason.is_none());
+
+        db.create_agent_run("run-boundary", None, "default")
+            .unwrap();
+        let degraded = runtime
+            .create(WorkspaceLifecycleSpec {
+                id: Some("ws-boundary".to_string()),
+                session_id: None,
+                run_id: Some("run-boundary".to_string()),
+                root_path: root.to_string_lossy().to_string(),
+                sandbox_backend: Some("boundary_only".to_string()),
+                setup_script: None,
+            })
+            .unwrap();
+        assert_eq!(degraded.sandbox_backend, "boundary_only");
+        assert_eq!(degraded.sandbox_status, "fallback_recorded");
+        assert!(degraded.fallback_reason.is_some());
     }
 
     #[test]

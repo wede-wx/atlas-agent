@@ -466,7 +466,15 @@ pub fn expected_tools_for_intent(intent: TaskIntent) -> Vec<String> {
             "set_active_plan_task",
         ],
     };
-    tools.iter().map(|tool| (*tool).to_string()).collect()
+    let mut tools: Vec<String> = tools.iter().map(|tool| (*tool).to_string()).collect();
+    // Step 1（契约结构化通道）：契约冻结工具必须在所有任务型意图下可达。
+    // expected_tools 非空时是白名单——若不追加，CodeEdit/Planning 等恰恰需要
+    // 冻结契约的意图会把该工具过滤成"未知工具"，结构化通道在生产中不可达。
+    // 空列表（Chat 等）本身不过滤，无需追加。
+    if !tools.is_empty() {
+        tools.push("atlas_freeze_goal_contract".to_string());
+    }
+    tools
 }
 
 pub fn normalize_tool_call(
@@ -1588,5 +1596,28 @@ mod tests {
         let edit = expected_tools_for_intent(TaskIntent::CodeEdit);
         assert!(edit.iter().any(|tool| tool == "search_files"));
         assert!(edit.iter().any(|tool| tool == "git_diff"));
+    }
+
+    #[test]
+    fn contract_freeze_tool_reachable_in_all_task_intents() {
+        // Step 1：expected_tools 白名单不得把契约冻结工具滤成"未知工具"。
+        for intent in [
+            TaskIntent::WebResearch,
+            TaskIntent::FileRead,
+            TaskIntent::CodeEdit,
+            TaskIntent::CommandRun,
+            TaskIntent::BrowserAutomation,
+            TaskIntent::Planning,
+        ] {
+            let tools = expected_tools_for_intent(intent);
+            assert!(
+                tools
+                    .iter()
+                    .any(|tool| tool == "atlas_freeze_goal_contract"),
+                "contract freeze tool must be reachable for {intent:?}"
+            );
+        }
+        // Chat 的空列表本身不过滤,保持为空(空 = 不限制,而非禁用)。
+        assert!(expected_tools_for_intent(TaskIntent::Chat).is_empty());
     }
 }

@@ -223,6 +223,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "futures-util",
+ "landlock",
  "regex",
  "reqwest 0.12.28",
  "rusqlite",
@@ -2047,6 +2048,17 @@ dependencies = [
  "bitflags 2.12.1",
  "serde",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "landlock"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "635839550ae8b90d9fd2571460a6645dc0aec070225956ca7a2831ed31d2795d"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

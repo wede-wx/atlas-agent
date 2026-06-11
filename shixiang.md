@@ -241,3 +241,69 @@ ame: matches destination folder, installed content hash matches source.
   - `tools::policy::tests::full_access_allows_everything_without_approval`
   - `agent::atlas_harness::contract_gate::tests::hookspath_rewire_is_a_hard_block`
 - Honest status: backend hardening replacement is validated on isolated branch but not merged to `main` yet. Branch still contains uncommitted hardening file changes unless explicitly committed/merged later.
+
+## atlas_hardening_final validation attempt (2026-06-11)
+
+- Branch: `backend-harden`.
+- Before applying final batch, committed previous hardening checkpoint: `2ca8efa chore: checkpoint initial hardening batch`.
+- Source used: extracted directory `C:\Users\Administrator\Desktop\atlas_hardening_final` (not zip; user confirmed proceeding). It contained 22 files matching `D:\MANIFEST.md`: 18 tracked modifications + 4 new files.
+- Applied final batch by copying directory contents over repository root.
+- `git status --short` after copy showed 22 batch files changed/new before recording this note.
+- Ran `cargo build` in `src-tauri`: failed. `cargo test --lib`, `npx tsc --noEmit`, eval-target validation, and final commit were not run because build did not pass.
+- Build errors:
+  - `src/agent/core.rs:1357`: cannot borrow `self.token_budget` as mutable behind `&self`; compiler suggests `&mut self` for method around line 1257.
+  - `src/agent/harness.rs:188`: non-exhaustive match; new `AgentEvent::AtlasDeviationBlocked { .. }` not covered.
+  - `src/commands/agent.rs:2990`: non-exhaustive match; new `AgentEvent::AtlasDeviationBlocked { .. }` not covered.
+- No test assertions were changed; no hardening gate logic was weakened; no final commit was made.
+- Honest status: final six-step hardening package is applied on `backend-harden` but blocked at compile stage pending user decision on whether to make integration fixes.
+
+## atlas_hardening_final integration fixes and cargo test failure (2026-06-11)
+
+- Branch: `backend-harden`.
+- Authorized integration fixes applied after initial final-batch build failure:
+  - `src-tauri/src/agent/core.rs`: made `gate_task_done` / `execute_tool` use mutable self access so verifier usage accounting can call `token_budget.record_usage`, matching the main loop's mutable accounting path.
+  - `src-tauri/src/agent/harness.rs`: added explicit `AgentEvent::AtlasDeviationBlocked` event name mapping (`atlas_deviation_blocked`).
+  - `src-tauri/src/commands/agent.rs`: added explicit `AgentEvent::AtlasDeviationBlocked` match arm in event persistence instead of wildcard swallowing.
+- Additional test-compile integration fix applied:
+  - `src-tauri/src/tools/command.rs` and `src-tauri/src/tools/execution_isolation.rs`: added explicit `require_sandbox: false` to existing `ExecutionIsolationConfig` test initializers, matching the struct's documented/default value.
+- `cargo build`: passed after these integration fixes.
+- `cargo test --lib`: failed after running tests. Summary: `643 passed; 11 failed; 2 ignored`.
+- Failed tests:
+  - `agent::core::tests::approved_deviation_unblocks_exact_action_with_disclosure`: panic `Block must emit the approval signature`.
+  - `agent::eval_harness::tests::atlas_gates_suite_pins_every_hardening_step`: `unknown suite kind: atlas_gates`.
+  - `agent::eval_harness::tests::builtin_eval_suites_are_valid`: `unknown suite kind: atlas_gates`.
+  - `agent::eval_harness::tests::benchmark_suite_has_real_exit_gate_and_ten_cases`: `unknown suite kind: atlas_gates`.
+  - `agent::eval_harness::tests::eval_suite_validation_requires_evidence_and_success_criteria`: `unknown suite kind: atlas_gates`.
+  - `agent::eval_harness::tests::provider_suite_covers_multiple_provider_shapes`: `unknown suite kind: atlas_gates`.
+  - `agent::eval_harness::tests::eval_runner_marks_claimed_completion_false_when_verifier_fails`: `unknown suite kind: atlas_gates`.
+  - `agent::eval_harness::tests::eval_runner_executes_verifiers_and_scores_exit_gate`: `unknown suite kind: atlas_gates`.
+  - `agent::eval_harness::tests::scoring_blocks_false_completion_even_when_case_says_passed`: `unknown suite kind: atlas_gates`.
+  - `agent::eval_harness::tests::orchestration_runs_agent_verifiers_and_persists_report`: `unknown suite kind: atlas_gates`.
+  - `tests::runtime_tool_registry_matches_builtin_skill_tools`: registry includes `atlas_freeze_goal_contract` but expected built-in skill tools list does not.
+- Per user constraint, stopped after test failure. Did not run `npx tsc --noEmit`; did not commit final hardening commit; did not weaken assertions or gate logic.
+
+## 2026-06-11 backend-harden final hardening validation - eval kind/tool registry 接线修复
+- 工作目录：C:\Users\Administrator\Desktop\atlas-agent，分支：backend-harden。
+- 本次只修用户授权的两类明确接线问题：
+  - 在 src-tauri/src/agent/eval_harness.rs 的 suite kind 白名单中加入 atlas_gates，未改套件文件 kind。
+  - 在 src-tauri/src/lib.rs 的 runtime_tool_registry_matches_builtin_skill_tools 期望清单中加入 atlas_freeze_goal_contract。
+- 验证：src-tauri 下运行 cargo test --lib。
+- 结果：653 passed; 1 failed; 2 ignored。此前 9 个 unknown suite kind: atlas_gates 相关失败已通过，runtime_tool_registry_matches_builtin_skill_tools 已通过。
+- 剩余失败：agent::core::tests::approved_deviation_unblocks_exact_action_with_disclosure，panic 于 src\agent\core.rs:3037:51，信息为 “Block must emit the approval signature”。该失败属于偏离批准/披露签名逻辑，不在本轮已授权的两类接线修复内，已停止，未擅自改 core 逻辑。
+- 未继续执行：npx tsc --noEmit、最终 commit。原因：cargo test --lib 未全绿。
+
+## 2026-06-12 backend-harden approved deviation 测试夹具修复
+- 工作目录：C:\Users\Administrator\Desktop\atlas-agent，分支：backend-harden。
+- 根因定位：approved_deviation_unblocks_exact_action_with_disclosure 的测试工具 edit_file 已被 active task gate 拦截在 Atlas gate 之前，导致 run A 没有进入 AtlasDeviationBlocked 事件分支。该问题是测试夹具缺失，不是 Atlas 闸逻辑或断言错误。
+- 修改范围：仅在 src-tauri/src/agent/core.rs 的该测试中给 agent_a 和 agent_b 增加 with_active_task_provider(|| Some("task-b1-deviation".to_string()))；同时撤销 RUN-A ENTER / RUN-A GATE 临时诊断行。
+- 未修改：未改任何 assert，未改 Atlas harness/active task gate/done gate 业务逻辑，未改 approved deviation 语义。
+- 验证：cargo test --lib approved_deviation_unblocks_exact_action_with_disclosure -- --nocapture 通过；cargo test --lib 通过，结果 654 passed; 0 failed; 2 ignored。
+- 后续：原 hardening 验证流水线还剩前端 npx tsc --noEmit 和最终提交步骤尚未在本条记录内执行。
+
+## 2026-06-12 backend-harden B1 前端底层接线
+- 工作目录：C:\Users\Administrator\Desktop\atlas-agent，分支：backend-harden。
+- 修改范围：仅 src/types.ts 和 src/bridge.ts 两个前端底层文件。
+- src/types.ts：新增 AtlasContractViolation interface；在 AgentEvent 联合类型中新增 AtlasDeviationBlocked 事件成员，未改现有成员、ToolCall 或 AgentEventEnvelope。
+- src/bridge.ts：文件末尾新增 resolveAtlasDeviation(opts) wrapper，调用后端 resolve_atlas_deviation，参数使用 camelCase：sessionId/itemId/target/approved/runId/toolName；返回暂用 UnknownRecord。
+- 未做：未做 UI 确认卡片，未改后端，未改其它前端导出。
+- 验证：仓库根运行 npx tsc --noEmit，通过，无错误输出。

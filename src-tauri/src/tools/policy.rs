@@ -142,6 +142,12 @@ impl PolicyEngine {
         if is_plan_tasks_tool_name(&metadata.name) {
             return PolicyDecision::Allow;
         }
+        if is_atlas_contract_tool_name(&metadata.name) {
+            // 同 evaluate_tool_visibility：契约冻结在任何模式下放行（规划层
+            // 状态，无文件/网络副作用）。子代理角色收紧不受影响——
+            // SubAgentRole::restrict 在本判定之外另行收紧，只紧不松。
+            return PolicyDecision::Allow;
+        }
         if metadata.name == "prepare_command" {
             return match self.mode {
                 AgentPermissionMode::Default => PolicyDecision::Allow,
@@ -173,6 +179,12 @@ impl PolicyEngine {
 
     pub fn evaluate_tool_visibility(&self, metadata: &ToolMetadata) -> PolicyDecision {
         if is_plan_tasks_tool_name(&metadata.name) {
+            return PolicyDecision::Allow;
+        }
+        if is_atlas_contract_tool_name(&metadata.name) {
+            // Step 1（契约结构化通道）：冻结契约是规划层状态变更，与 plan_tasks
+            // 同类——不碰文件系统/网络。任何模式都必须可见可用，否则 Gate Mode
+            // 在计划/默认模式下没有机械落点（契约恰恰是在计划阶段冻结的）。
             return PolicyDecision::Allow;
         }
         if metadata.name == "stop_run" {
@@ -258,6 +270,12 @@ fn is_plan_tasks_tool_name(name: &str) -> bool {
             | "list_plan_tasks"
             | "set_active_plan_task"
     )
+}
+
+/// Step 1：契约冻结工具按名字识别（与 plan_tasks 同款先例）。常量定义在
+/// `tools::goal_contract`，这里按字面量比对避免模块环。
+fn is_atlas_contract_tool_name(name: &str) -> bool {
+    name == "atlas_freeze_goal_contract"
 }
 
 /// P3-2: a subagent runs as a constrained *role*, not an unlimited worker.
@@ -419,6 +437,34 @@ mod tests {
             safety_level,
             mutates_state,
             requires_confirmation: false,
+        }
+    }
+
+    #[test]
+    fn atlas_contract_tool_visible_and_executable_in_all_modes() {
+        // Step 1：若计划/默认模式拒掉契约工具，Gate Mode 就没有机械落点。
+        // 注意元数据是 Sensitive + mutates_state=true，通用推断会在 Plan 模式
+        // 拒绝 Write——本测试钉住的是按名放行分支必须先于通用推断生效。
+        let md = metadata(
+            "atlas_freeze_goal_contract",
+            vec![ToolCapability::Memory],
+            ToolSafetyLevel::Sensitive,
+            true,
+        );
+        for mode in [
+            AgentPermissionMode::Plan,
+            AgentPermissionMode::Default,
+            AgentPermissionMode::FullAccess,
+        ] {
+            let engine = PolicyEngine::new(mode.clone());
+            assert!(
+                matches!(engine.evaluate_tool_visibility(&md), PolicyDecision::Allow),
+                "visibility must be Allow in {mode:?}"
+            );
+            assert!(
+                matches!(engine.evaluate_tool_execution(&md), PolicyDecision::Allow),
+                "execution must be Allow in {mode:?}"
+            );
         }
     }
 

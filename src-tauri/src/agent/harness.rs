@@ -220,6 +220,7 @@ impl AgentHarnessRun {
                 AgentEvent::ResponseCompleted { .. } => "response_completed",
                 AgentEvent::ResponseFallbackStarted { .. } => "response_fallback_started",
                 AgentEvent::Response { .. } => "response",
+                AgentEvent::AtlasDeviationBlocked { .. } => "atlas_deviation_blocked",
                 AgentEvent::FinalAudit { .. } => "final_audit",
             })
             .collect()

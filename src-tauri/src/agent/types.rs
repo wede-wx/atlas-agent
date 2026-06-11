@@ -329,6 +329,16 @@ pub enum AgentEvent {
         target: Option<String>,
         command: Option<String>,
     },
+    /// B1: an Atlas ContractGate hard block, carrying the exact approval
+    /// signature so the UI confirmation card can call
+    /// `resolve_atlas_deviation(session_id, item_id, target, approved)`.
+    AtlasDeviationBlocked {
+        tool_name: String,
+        /// `action_target_signature` of the blocked action.
+        target: String,
+        reason: String,
+        violations: Vec<crate::agent::atlas_harness::Violation>,
+    },
     OperationOutput {
         operation_id: String,
         stream: String,

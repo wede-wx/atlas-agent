@@ -334,3 +334,21 @@ export async function getLocalDbHealth(): Promise<UnknownRecord> {
   return invokeCommand<UnknownRecord>("get_local_db_health");
 }
 
+export async function resolveAtlasDeviation(opts: {
+  sessionId: string;
+  itemId: string;
+  target: string;
+  approved: boolean;
+  runId?: string | null;
+  toolName?: string | null;
+}): Promise<UnknownRecord> {
+  return invokeCommand<UnknownRecord>("resolve_atlas_deviation", {
+    sessionId: opts.sessionId,
+    itemId: opts.itemId,
+    target: opts.target,
+    approved: opts.approved,
+    runId: opts.runId ?? null,
+    toolName: opts.toolName ?? null,
+  });
+}
+

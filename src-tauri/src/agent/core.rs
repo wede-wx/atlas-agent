@@ -49,6 +49,11 @@ pub struct ContextBuilder;
 
 type AgentToolAuditSink = Arc<dyn Fn(AgentToolAuditEvent) + Send + Sync>;
 type AgentUsageSink = Arc<dyn Fn(AgentUsageEvent) + Send + Sync>;
+/// A6: sink invoked once, immediately after a Goal Contract is frozen and
+/// installed into the in-memory harness. The commands layer captures
+/// LocalDb + session_id in the closure so `Agent` stays storage-free, like
+/// the other providers/sinks.
+type ContractPersistSink = Arc<dyn Fn(&crate::agent::atlas_harness::GoalContract) + Send + Sync>;
 pub type AgentGuidanceQueues = Arc<Mutex<HashMap<String, Vec<AgentGuidanceMessage>>>>;
 pub type ActiveTaskProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 pub type ActiveTaskContextProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
@@ -66,6 +71,35 @@ pub type PostCommandVerifyHook = Arc<
                         Output = Option<Vec<crate::tools::run_verify::AutoVerifyReport>>,
                     > + Send,
             >,
+        > + Send
+        + Sync,
+>;
+
+/// Step 5: facts about the task being marked done, gathered by the commands
+/// layer (db + git). Core combines them with the contract it holds: the
+/// mechanical CompletionGate first (free), then the independent adversarial
+/// Verifier (one fresh-context LLM call). The provider stays storage-free on
+/// the core side, like the other providers/hooks.
+#[derive(Debug, Clone, Default)]
+pub struct CompletionEvidenceFacts {
+    /// Task evidence_status from storage ("verified"/"pending"/...).
+    pub evidence_status: String,
+    /// Ids of verification runs with status=passed (real artifacts).
+    pub passed_verification_ids: Vec<String>,
+    /// Task title + acceptance criteria text — core mechanically matches
+    /// contract item ids (e.g. "M1") appearing here to build covered_items.
+    pub task_text: String,
+    /// `git diff`, already truncated by the provider (cost control).
+    pub diff: String,
+    /// Human-readable verification evidence fed to the Verifier prompt.
+    pub test_evidence: String,
+}
+
+pub type CompletionEvidenceProvider = Arc<
+    dyn Fn(
+            String,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Option<CompletionEvidenceFacts>> + Send>,
         > + Send
         + Sync,
 >;
@@ -147,6 +181,8 @@ pub struct Agent {
     tools_enabled: bool,
     tool_access_policy: ToolAccessPolicy,
     atlas: std::sync::Mutex<crate::agent::atlas_harness::AtlasHarness>,
+    contract_persist_sink: Option<ContractPersistSink>,
+    completion_evidence_provider: Option<CompletionEvidenceProvider>,
     tool_audit_sink: Option<AgentToolAuditSink>,
     usage_sink: Option<AgentUsageSink>,
     run_id_override: Option<String>,
@@ -171,6 +207,8 @@ impl Agent {
             tools_enabled: true,
             tool_access_policy: ToolAccessPolicy::FullAccess,
             atlas: std::sync::Mutex::new(crate::agent::atlas_harness::AtlasHarness::new()),
+            contract_persist_sink: None,
+            completion_evidence_provider: None,
             tool_audit_sink: None,
             usage_sink: None,
             run_id_override: None,
@@ -265,6 +303,56 @@ impl Agent {
     ) -> Self {
         self.usage_sink = Some(Arc::new(sink));
         self
+    }
+
+    /// A6: register the sink that persists a freshly frozen Goal Contract to
+    /// storage (keyed by session_id at the commands layer). Persistence is
+    /// additive — it never gates, loosens, or reorders any harness decision.
+    pub fn with_contract_persist_sink(
+        mut self,
+        sink: impl Fn(&crate::agent::atlas_harness::GoalContract) + Send + Sync + 'static,
+    ) -> Self {
+        self.contract_persist_sink = Some(Arc::new(sink));
+        self
+    }
+
+    /// A6: reinstall a contract that was persisted by a previous run, arming
+    /// the harness before the loop starts. With a contract installed, the
+    /// in-loop extraction short-circuits via its `need_contract` check, so the
+    /// restored contract cannot be overwritten by this run's assistant text —
+    /// gating semantics are unchanged.
+    pub fn preinstall_goal_contract(&self, contract: crate::agent::atlas_harness::GoalContract) {
+        self.atlas
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .install_contract(contract);
+    }
+
+    /// Step 5: register the provider that gathers done-gate evidence
+    /// (task facts + git diff + verification evidence). Without a provider
+    /// the done gate is inert — existing behavior is unchanged.
+    pub fn with_completion_evidence_provider<F, Fut>(mut self, provider: F) -> Self
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Option<CompletionEvidenceFacts>> + Send + 'static,
+    {
+        self.completion_evidence_provider =
+            Some(Arc::new(move |task_id| Box::pin(provider(task_id))));
+        self
+    }
+
+    /// B1: reinstall user-approved deviations persisted by the commands layer.
+    /// Replaces the harness approval set, so revocations take effect on the
+    /// next run. Only ever fed from the user-side Tauri command — the model
+    /// has no path into this state.
+    pub fn preinstall_deviation_approvals(
+        &mut self,
+        approvals: impl IntoIterator<Item = (String, String)>,
+    ) {
+        self.atlas
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .install_approvals(approvals);
     }
 
     pub fn with_run_id(mut self, run_id: String) -> Self {
@@ -606,10 +694,44 @@ impl Agent {
                 .iter()
                 .map(|message| message.content.chars().count() as i64)
                 .sum();
-            let response = self
-                .llm_client
-                .chat_completion_stream(llm_messages, tools, Some(event_tx.clone()))
-                .await?;
+            // Step 4（瞬态重试）：fallback 链只提供「空间冗余」（换连接，每个
+            // 连接一次机会）；这里补「时间冗余」——同一轮模型调用对 Llm 类错误
+            // 做有限退避重试，单连接配置下一次网络抖动不再报废整个 run。
+            // 永不重试：Cancelled（用户意志）/ Tool / MaxIterations。
+            // 重试永不静默：每次都发 Thinking 事件留痕。
+            let response = {
+                const MAX_LLM_RETRIES: usize = 2;
+                const BACKOFF_MS: [u64; MAX_LLM_RETRIES] = [500, 1500];
+                let mut attempt = 0usize;
+                loop {
+                    match self
+                        .llm_client
+                        .chat_completion_stream(
+                            llm_messages.clone(),
+                            tools.clone(),
+                            Some(event_tx.clone()),
+                        )
+                        .await
+                    {
+                        Ok(response) => break response,
+                        Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
+                        Err(error @ AgentError::Llm(_)) if attempt < MAX_LLM_RETRIES => {
+                            let delay_ms = BACKOFF_MS[attempt];
+                            attempt += 1;
+                            emit_event(
+                                &event_tx,
+                                AgentEvent::Thinking {
+                                    content: format!(
+                                        "模型调用失败（{error}），{delay_ms}ms 后重试（第 {attempt}/{MAX_LLM_RETRIES} 次）。"
+                                    ),
+                                },
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            };
 
             // M-9 (a): always record the turn against the budget. When the
             // provider reports no usage, fall back to a conservative estimate and
@@ -742,12 +864,18 @@ impl Agent {
                     if let Some(raw_content) = response.content.as_deref() {
                         use crate::agent::atlas_harness::glue::extract_contract_block;
                         if let Some(block) = extract_contract_block(raw_content) {
-                            let _ = self
+                            let result = self
                                 .atlas
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                                 .install_contract_from_skill(block);
-                            // 可选：把契约持久化到 storage，便于会话重入
+                            // A6：契约冻结后立刻持久化（commands 层按 session_id
+                            // 落 storage），保证 AgentCore 重建 / 会话重入后
+                            // harness 仍然设防。持久化失败不阻断主循环——它是
+                            // “让契约活得更久”，不是一道新的闸。
+                            if let Some(sink) = &self.contract_persist_sink {
+                                sink(&result.contract);
+                            }
                         }
                     }
                 }
@@ -820,6 +948,41 @@ impl Agent {
                         crate::tools::secret_scan::SecretAction::Masked,
                     )
                     .text;
+                    // ── Step 1（契约结构化通道）：消费冻结工具的成功结果 ──
+                    // 工具触不到 Agent 内存里的 harness，安装由这里完成：
+                    // 反序列化工具回传的契约 → 装进 harness → 触发 A6 持久化
+                    // sink。先冻结者胜（contract 已存在则跳过），与文本通道的
+                    // need_contract 语义一致；判定逻辑零改动。
+                    if tool_call.name == crate::tools::ATLAS_FREEZE_GOAL_CONTRACT_TOOL
+                        && matches!(result.status, ToolResultStatus::Success)
+                    {
+                        let parsed = result.data.get("contract").cloned().and_then(|value| {
+                            serde_json::from_value::<crate::agent::atlas_harness::GoalContract>(
+                                value,
+                            )
+                            .ok()
+                        });
+                        if let Some(mut contract) = parsed {
+                            contract.freeze();
+                            let installed = {
+                                let mut harness = self
+                                    .atlas
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                if harness.contract().is_none() {
+                                    harness.install_contract(contract.clone());
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+                            if installed {
+                                if let Some(sink) = &self.contract_persist_sink {
+                                    sink(&contract);
+                                }
+                            }
+                        }
+                    }
                     let budget_result = match &result.status {
                         ToolResultStatus::Error => runtime.record_tool_error(),
                         ToolResultStatus::Success | ToolResultStatus::Warning => {
@@ -1057,7 +1220,7 @@ impl Agent {
     }
 
     fn block_standalone_guidance_tool(
-        &self,
+        &mut self,
         tool_call: &ToolCall,
         run_id: &str,
         iteration: usize,
@@ -1082,6 +1245,189 @@ impl Agent {
                 "不要继续旧任务，也不要再调用工具".to_string(),
             ],
         )
+    }
+
+    /// Step 5：done 闸。返回 Some(result) = 拦截（不执行 update_plan_task）；
+    /// None = 放行。两段式：先跑零成本的契约感知 CompletionGate
+    /// （can_mark_done——硬性项覆盖必须 verified + 绑定真实验证产物），
+    /// 过了才花一次全新上下文的 LLM 调用做独立对抗审查（Verifier）。
+    /// 审查员只拿到契约 + diff + 验证证据，没有实现 trajectory——
+    /// 它没有替「自己做的事」辩护的动机。
+    async fn gate_task_done(
+        &mut self,
+        tool_call: &ToolCall,
+        run_id: &str,
+        iteration: usize,
+        event_tx: &Sender<AgentEvent>,
+    ) -> Option<ToolResult> {
+        use crate::agent::atlas_harness::completion_gate::{can_mark_done, TaskEvidenceRef};
+        use crate::agent::atlas_harness::{
+            build_review_prompt, parse_verdict, CompletionDecision, VerifierVerdict,
+        };
+
+        // 契约活跃 + provider 注入，二者缺一闸不启动（行为与既有版本一致）。
+        let contract = {
+            let harness = self
+                .atlas
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            harness
+                .contract()
+                .filter(|contract| contract.has_hard_constraints())
+                .cloned()
+        }?;
+        let provider = self.completion_evidence_provider.as_ref()?;
+
+        let task_id = tool_call
+            .arguments
+            .get("task_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        let Some(facts) = provider(task_id.clone()).await else {
+            // fail-closed：证据取不到就不放行 done——「我觉得完成了」不算数。
+            self.emit_tool_audit(
+                run_id,
+                iteration,
+                tool_call,
+                AgentToolAuditStatus::Blocked,
+                "atlas_done_gate_unavailable",
+            );
+            emit_blocked_operation(
+                event_tx,
+                tool_call,
+                "done 闸无法收集证据（任务记录/项目根不可用），暂不放行完成。".to_string(),
+            );
+            return Some(ToolResult::recoverable_error(
+                "Atlas done 闸：无法收集完成证据，暂不放行 done。",
+                vec![
+                    "确认 task_id 正确且任务存在".to_string(),
+                    "先运行 run_verify 产出真实验证记录后重试".to_string(),
+                ],
+            ));
+        };
+
+        // ── 阶段 1：CompletionGate（纯逻辑，零成本，先跑）──
+        // covered_items 机械构造：契约项 id 出现在任务标题/验收文本里即视为覆盖。
+        let covered_items: Vec<String> = contract
+            .must_do
+            .iter()
+            .chain(contract.must_not_do.iter())
+            .chain(contract.constraints.iter())
+            .map(|item| item.id.clone())
+            .chain(contract.preserve.iter().map(|item| item.id.clone()))
+            .filter(|id| facts.task_text.contains(id.as_str()))
+            .collect();
+        let evidence_ref = TaskEvidenceRef {
+            task_id: task_id.clone(),
+            evidence_status: facts.evidence_status.clone(),
+            verification_ids: facts.passed_verification_ids.clone(),
+            covered_items,
+        };
+        if let CompletionDecision::Block { reason } = can_mark_done(&evidence_ref, &contract) {
+            self.emit_tool_audit(
+                run_id,
+                iteration,
+                tool_call,
+                AgentToolAuditStatus::Blocked,
+                "atlas_completion_gate_block",
+            );
+            emit_blocked_operation(event_tx, tool_call, reason.clone());
+            return Some(ToolResult::recoverable_error(
+                format!("Atlas 完成闸：{reason}"),
+                vec![
+                    "用 run_verify 产出真实验证产物，把 evidence_status 落到 verified".to_string(),
+                    "不要在缺证据的情况下重复尝试标 done".to_string(),
+                ],
+            ));
+        }
+
+        // ── 阶段 2：独立 Verifier（一次全新上下文调用）──
+        let prompt = build_review_prompt(&contract, &facts.diff, &facts.test_evidence);
+        let reviewer_output = match self
+            .llm_client
+            .chat_completion(vec![Message::plain(Role::User, prompt)], None)
+            .await
+        {
+            Ok(response) => {
+                // M-9：审查调用也计入预算（provider 报了 usage 才计；审查输出
+                // 很短，不做估算兜底以保持简单）。
+                if let Some(usage) = response.usage.clone() {
+                    if let Some(stop) = self.token_budget.record_usage(&usage) {
+                        let summary = emit_token_budget_blocked(event_tx, run_id, stop);
+                        return Some(ToolResult::error(summary, vec![]));
+                    }
+                    if let Some(sink) = &self.usage_sink {
+                        sink(AgentUsageEvent {
+                            run_id: run_id.to_string(),
+                            iteration,
+                            usage,
+                            provider: None,
+                            model: None,
+                            source: "atlas_verifier".to_string(),
+                        });
+                    }
+                }
+                response.content.unwrap_or_default()
+            }
+            // fail-closed：审查发不出去 ≠ 审查通过。
+            Err(_) => String::new(),
+        };
+        let verdict = parse_verdict(&reviewer_output);
+
+        match &verdict {
+            VerifierVerdict::Pass => None,
+            VerifierVerdict::Deviations(deviations) => {
+                let detail = deviations
+                    .iter()
+                    .map(|d| {
+                        format!(
+                            "[{}/{:?}] {}（证据：{}）",
+                            d.contract_item_id, d.severity, d.description, d.evidence
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("；");
+                if verdict.blocks_completion() {
+                    self.emit_tool_audit(
+                        run_id,
+                        iteration,
+                        tool_call,
+                        AgentToolAuditStatus::Blocked,
+                        "atlas_verifier_block",
+                    );
+                    emit_blocked_operation(
+                        event_tx,
+                        tool_call,
+                        format!("独立审查发现硬性偏离，拒绝标 done：{detail}"),
+                    );
+                    Some(ToolResult::recoverable_error(
+                        format!("Atlas 独立审查：发现硬性偏离，done 被拒。{detail}"),
+                        vec![
+                            "逐条修复以上偏离，重新验证后再标 done".to_string(),
+                            "不要试图改写任务描述绕开审查".to_string(),
+                        ],
+                    ))
+                } else {
+                    // soft deviation：放行 done，但机械披露留痕（放行 ≠ 失忆）。
+                    self.emit_tool_audit(
+                        run_id,
+                        iteration,
+                        tool_call,
+                        AgentToolAuditStatus::Allowed,
+                        "atlas_verifier_disclosed",
+                    );
+                    emit_event(
+                        event_tx,
+                        AgentEvent::Thinking {
+                            content: format!("Atlas 审查披露（软性偏离，已放行）：{detail}"),
+                        },
+                    );
+                    None
+                }
+            }
+        }
     }
 
     async fn drain_guidance(&self, run_id: &str) -> Vec<AgentGuidanceMessage> {
@@ -1110,7 +1456,7 @@ impl Agent {
     }
 
     async fn execute_tool(
-        &self,
+        &mut self,
         tool_call: &ToolCall,
         run_id: &str,
         iteration: usize,
@@ -1269,6 +1615,31 @@ impl Agent {
             match gate {
                 HarnessGate::Allow => { /* 与契约不冲突，继续往下执行 */ }
 
+                HarnessGate::ApprovedDeviation { reason, violations } => {
+                    // B1：用户已对 (条款, 目标) 显式批准——放行执行，但偏离被
+                    // 机械披露：audit 标记 atlas_approved_deviation + 事件留痕。
+                    // 批准不是失忆；这条永远不会折叠成静默 Allow。
+                    let detail = violations
+                        .iter()
+                        .map(|v| format!("[{}] {}", v.item_id, v.why))
+                        .collect::<Vec<_>>()
+                        .join("；");
+                    self.emit_tool_audit(
+                        run_id,
+                        iteration,
+                        tool_call,
+                        AgentToolAuditStatus::Allowed,
+                        "atlas_approved_deviation",
+                    );
+                    emit_event(
+                        event_tx,
+                        AgentEvent::Thinking {
+                            content: format!("Atlas 披露：{reason}（{detail}）"),
+                        },
+                    );
+                    // 不 return —— 落到闸后的正常执行路径。
+                }
+
                 HarnessGate::Block { reason, violations } => {
                     let detail = violations
                         .iter()
@@ -1282,6 +1653,24 @@ impl Agent {
                         AgentToolAuditStatus::Blocked,
                         "atlas_contract_block",
                     );
+                    // B1：携带精确批准签名的事件——前端确认卡片据此调用
+                    // resolve_atlas_deviation(session_id, item_id, target, approved)。
+                    {
+                        use crate::agent::atlas_harness::glue::proposed_action_from_tool_call;
+                        let action =
+                            proposed_action_from_tool_call(&tool_call.name, &tool_call.arguments);
+                        emit_event(
+                            event_tx,
+                            AgentEvent::AtlasDeviationBlocked {
+                                tool_name: tool_call.name.clone(),
+                                target: crate::agent::atlas_harness::action_target_signature(
+                                    &action,
+                                ),
+                                reason: reason.clone(),
+                                violations: violations.clone(),
+                            },
+                        );
+                    }
                     emit_blocked_operation(event_tx, tool_call, reason.clone());
                     return ToolResult::error(
                         format!("Atlas 拦截：{reason}（{detail}）"),
@@ -1336,6 +1725,25 @@ impl Agent {
             }
         }
         // ===== Atlas 闸结束 =====
+
+        // ===== Step 5：done 闸（CompletionGate + 独立 Verifier）=====
+        // 只拦 update_plan_task(status=done)，且只在契约活跃 + provider 注入
+        // 时生效——随意会话零成本、既有行为零变化。
+        if tool_call.name == "update_plan_task"
+            && tool_call
+                .arguments
+                .get("status")
+                .and_then(|value| value.as_str())
+                .is_some_and(|status| status.eq_ignore_ascii_case("done"))
+        {
+            if let Some(blocked) = self
+                .gate_task_done(tool_call, run_id, iteration, event_tx)
+                .await
+            {
+                return blocked;
+            }
+        }
+        // ===== done 闸结束 =====
 
         self.emit_tool_audit(
             run_id,
@@ -2195,6 +2603,635 @@ mod tests {
         let result = agent.chat("你好".to_string(), tx).await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("你好"));
+    }
+
+    // ---- Step 4：模型调用瞬态重试 ----
+    struct FlakyLLM {
+        failures_left: Arc<Mutex<usize>>,
+        error: AgentError,
+        inner: MockLLM,
+        attempts: Arc<Mutex<usize>>,
+    }
+    impl FlakyLLM {
+        fn new(failures: usize, error: AgentError, responses: Vec<ChatResponse>) -> Self {
+            Self {
+                failures_left: Arc::new(Mutex::new(failures)),
+                error,
+                inner: MockLLM::new(responses),
+                attempts: Arc::new(Mutex::new(0)),
+            }
+        }
+    }
+    #[async_trait]
+    impl LLMClient for FlakyLLM {
+        async fn chat_completion(
+            &self,
+            messages: Vec<Message>,
+            tools: Option<Vec<ToolSchema>>,
+        ) -> Result<ChatResponse, AgentError> {
+            *self.attempts.lock().unwrap() += 1;
+            {
+                let mut left = self.failures_left.lock().unwrap();
+                if *left > 0 {
+                    *left -= 1;
+                    return Err(match &self.error {
+                        AgentError::Llm(message) => AgentError::Llm(message.clone()),
+                        AgentError::Cancelled => AgentError::Cancelled,
+                        AgentError::Tool(message) => AgentError::Tool(message.clone()),
+                        AgentError::MaxIterations => AgentError::MaxIterations,
+                    });
+                }
+            }
+            self.inner.chat_completion(messages, tools).await
+        }
+    }
+
+    fn plain_reply(text: &str) -> Vec<ChatResponse> {
+        vec![ChatResponse {
+            content: Some(text.to_string()),
+            tool_calls: vec![],
+            finish_reason: "stop".to_string(),
+            usage: None,
+        }]
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_llm_failure_is_retried_and_run_survives() {
+        let llm = FlakyLLM::new(
+            1,
+            AgentError::Llm("connection reset".into()),
+            plain_reply("恢复了。"),
+        );
+        let attempts = llm.attempts.clone();
+        let mut agent = Agent::new(Box::new(llm), ToolRegistry::new());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let result = agent.chat("hi".to_string(), tx).await;
+        assert!(
+            result.is_ok(),
+            "one transient failure must not kill the run"
+        );
+        assert!(result.unwrap().contains("恢复了"));
+        assert_eq!(*attempts.lock().unwrap(), 2, "fail once + succeed once");
+        let mut saw_retry_note = false;
+        while let Ok(event) = rx.try_recv() {
+            if let AgentEvent::Thinking { content } = event {
+                if content.contains("后重试") {
+                    saw_retry_note = true;
+                }
+            }
+        }
+        assert!(saw_retry_note, "retry must never be silent");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn persistent_llm_failure_fails_after_bounded_retries() {
+        let llm = FlakyLLM::new(
+            10,
+            AgentError::Llm("provider down".into()),
+            plain_reply("unreachable"),
+        );
+        let attempts = llm.attempts.clone();
+        let mut agent = Agent::new(Box::new(llm), ToolRegistry::new());
+        let (tx, mut _rx) = tokio::sync::mpsc::channel(64);
+        let result = agent.chat("hi".to_string(), tx).await;
+        assert!(matches!(result, Err(AgentError::Llm(_))));
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            3,
+            "1 initial + 2 bounded retries, then give up"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_is_never_retried() {
+        let llm = FlakyLLM::new(10, AgentError::Cancelled, plain_reply("unreachable"));
+        let attempts = llm.attempts.clone();
+        let mut agent = Agent::new(Box::new(llm), ToolRegistry::new());
+        let (tx, mut _rx) = tokio::sync::mpsc::channel(64);
+        let result = agent.chat("hi".to_string(), tx).await;
+        assert!(matches!(result, Err(AgentError::Cancelled)));
+        assert_eq!(*attempts.lock().unwrap(), 1, "user intent is not retryable");
+    }
+
+    // ---- Step 5：done 闸（CompletionGate + 独立 Verifier）----
+    struct CountingDoneTool {
+        executions: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait]
+    impl crate::tools::Tool for CountingDoneTool {
+        fn name(&self) -> &str {
+            "update_plan_task"
+        }
+        fn description(&self) -> &str {
+            "test done tool"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: serde_json::json!({ "type": "object" }),
+            }
+        }
+        async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult, AgentError> {
+            self.executions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ToolResult::success("done", serde_json::json!({})))
+        }
+    }
+
+    fn done_call() -> ToolCall {
+        ToolCall {
+            id: "call-done-1".to_string(),
+            name: "update_plan_task".to_string(),
+            arguments: serde_json::json!({ "task_id": "t1", "status": "done" }),
+        }
+    }
+
+    fn done_responses(verifier_reply: Option<&str>) -> Vec<ChatResponse> {
+        let mut responses = vec![ChatResponse {
+            content: None,
+            tool_calls: vec![done_call()],
+            finish_reason: "tool_calls".to_string(),
+            usage: None,
+        }];
+        if let Some(reply) = verifier_reply {
+            responses.push(ChatResponse {
+                content: Some(reply.to_string()),
+                tool_calls: vec![],
+                finish_reason: "stop".to_string(),
+                usage: None,
+            });
+        }
+        responses.push(ChatResponse {
+            content: Some("好的。".to_string()),
+            tool_calls: vec![],
+            finish_reason: "stop".to_string(),
+            usage: None,
+        });
+        responses
+    }
+
+    fn hard_contract() -> crate::agent::atlas_harness::GoalContract {
+        let mut contract =
+            crate::agent::atlas_harness::GoalContract::from_structured(&serde_json::json!({
+                "goal": "ship X",
+                "must_do": [ { "id": "M1", "text": "real backend", "hard": true } ]
+            }))
+            .contract;
+        contract.freeze();
+        contract
+    }
+
+    struct DoneGateHarness {
+        executions: Arc<std::sync::atomic::AtomicUsize>,
+        audits: Arc<Mutex<Vec<String>>>,
+        call_count: Arc<Mutex<usize>>,
+        agent: Agent,
+    }
+
+    fn done_gate_agent(
+        responses: Vec<ChatResponse>,
+        contract: Option<crate::agent::atlas_harness::GoalContract>,
+        facts: Option<CompletionEvidenceFacts>,
+    ) -> DoneGateHarness {
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(CountingDoneTool {
+            executions: executions.clone(),
+        }));
+        let mock = MockLLM::new(responses);
+        let call_count = mock.call_count.clone();
+        let audits: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let audits_sink = audits.clone();
+        let agent = Agent::new(Box::new(mock), registry)
+            .with_tool_audit_sink(move |event: AgentToolAuditEvent| {
+                audits_sink.lock().unwrap().push(event.reason);
+            })
+            .with_completion_evidence_provider(move |_task_id: String| {
+                let facts = facts.clone();
+                async move { facts.clone() }
+            });
+        if let Some(contract) = contract {
+            agent.preinstall_goal_contract(contract);
+        }
+        DoneGateHarness {
+            executions,
+            audits,
+            call_count,
+            agent,
+        }
+    }
+
+    fn verified_facts() -> CompletionEvidenceFacts {
+        CompletionEvidenceFacts {
+            evidence_status: "verified".to_string(),
+            passed_verification_ids: vec!["v1".to_string()],
+            task_text: "实现 M1 真后端".to_string(),
+            diff: "--- a/x\n+++ b/x".to_string(),
+            test_evidence: "- [passed] cargo test (exit=Some(0))".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn done_gate_inert_without_contract() {
+        let mut h = done_gate_agent(done_responses(None), None, Some(verified_facts()));
+        let (tx, mut _rx) = tokio::sync::mpsc::channel(64);
+        h.agent
+            .chat("把任务 t1 标记完成".to_string(), tx)
+            .await
+            .unwrap();
+        assert_eq!(h.executions.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            *h.call_count.lock().unwrap(),
+            2,
+            "no verifier call without a contract"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_gate_blocks_unverified_hard_task_without_llm_cost() {
+        let facts = CompletionEvidenceFacts {
+            evidence_status: "pending".to_string(),
+            passed_verification_ids: vec![],
+            ..verified_facts()
+        };
+        let mut h = done_gate_agent(done_responses(None), Some(hard_contract()), Some(facts));
+        let (tx, mut _rx) = tokio::sync::mpsc::channel(64);
+        h.agent
+            .chat("把任务 t1 标记完成".to_string(), tx)
+            .await
+            .unwrap();
+        assert_eq!(h.executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            *h.call_count.lock().unwrap(),
+            2,
+            "stage-1 block must not spend a verifier LLM call"
+        );
+        assert!(h
+            .audits
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r == "atlas_completion_gate_block"));
+    }
+
+    #[tokio::test]
+    async fn verifier_hard_deviation_blocks_done() {
+        let reply = r#"{"verdict":"deviations","deviations":[{"contract_item_id":"M1","description":"后端是 mock","severity":"hard","evidence":"diff 无服务端代码"}]}"#;
+        let mut h = done_gate_agent(
+            done_responses(Some(reply)),
+            Some(hard_contract()),
+            Some(verified_facts()),
+        );
+        let (tx, mut _rx) = tokio::sync::mpsc::channel(64);
+        h.agent
+            .chat("把任务 t1 标记完成".to_string(), tx)
+            .await
+            .unwrap();
+        assert_eq!(h.executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(*h.call_count.lock().unwrap(), 3, "main + verifier + final");
+        assert!(h
+            .audits
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r == "atlas_verifier_block"));
+    }
+
+    #[tokio::test]
+    async fn verifier_soft_deviation_allows_done_with_disclosure() {
+        let reply = r#"{"verdict":"deviations","deviations":[{"contract_item_id":"M1","description":"命名与契约略有出入","severity":"soft","evidence":"diff 第 3 行"}]}"#;
+        let mut h = done_gate_agent(
+            done_responses(Some(reply)),
+            Some(hard_contract()),
+            Some(verified_facts()),
+        );
+        let (tx, mut _rx) = tokio::sync::mpsc::channel(64);
+        h.agent
+            .chat("把任务 t1 标记完成".to_string(), tx)
+            .await
+            .unwrap();
+        assert_eq!(h.executions.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(h
+            .audits
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r == "atlas_verifier_disclosed"));
+    }
+
+    #[tokio::test]
+    async fn verifier_garbage_output_blocks_conservatively() {
+        let mut h = done_gate_agent(
+            done_responses(Some("我觉得没问题，不输出 JSON")),
+            Some(hard_contract()),
+            Some(verified_facts()),
+        );
+        let (tx, mut _rx) = tokio::sync::mpsc::channel(64);
+        h.agent
+            .chat("把任务 t1 标记完成".to_string(), tx)
+            .await
+            .unwrap();
+        assert_eq!(h.executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(h
+            .audits
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r == "atlas_verifier_block"));
+    }
+
+    #[tokio::test]
+    async fn approved_deviation_unblocks_exact_action_with_disclosure() {
+        // B1 端到端：run A 对 preserve 路径的写动作被 Block（事件携带精确
+        // 批准签名）→（用户经命令层批准，模拟为重装批准集）→ run B 同一
+        // 动作放行执行，且 audit 留下 atlas_approved_deviation 披露痕迹。
+        use crate::agent::atlas_harness::GoalContract;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingEditTool {
+            executions: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl crate::tools::Tool for CountingEditTool {
+            fn name(&self) -> &str {
+                "edit_file"
+            }
+            fn description(&self) -> &str {
+                "test edit tool"
+            }
+            fn schema(&self) -> ToolSchema {
+                ToolSchema {
+                    name: self.name().to_string(),
+                    description: self.description().to_string(),
+                    parameters: serde_json::json!({ "type": "object" }),
+                }
+            }
+            async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult, AgentError> {
+                self.executions.fetch_add(1, Ordering::SeqCst);
+                Ok(ToolResult::success("edited", serde_json::json!({})))
+            }
+        }
+
+        let contract = GoalContract::from_structured(&serde_json::json!({
+            "goal": "ship X",
+            "preserve": [
+                { "id": "P1", "text": "keep src/ui/**", "kind": "layout_structure", "path_glob": "src/ui/**" }
+            ],
+            "in_scope": ["src/x"]
+        }))
+        .contract;
+        let edit_call = || ToolCall {
+            id: "call-edit-1".to_string(),
+            name: "edit_file".to_string(),
+            arguments: serde_json::json!({
+                "path": "src/ui/App.tsx", "old_str": "a", "new_str": "b"
+            }),
+        };
+        let responses = || {
+            vec![
+                ChatResponse {
+                    content: None,
+                    tool_calls: vec![edit_call()],
+                    finish_reason: "tool_calls".to_string(),
+                    usage: None,
+                },
+                ChatResponse {
+                    content: Some("收到。".to_string()),
+                    tool_calls: vec![],
+                    finish_reason: "stop".to_string(),
+                    usage: None,
+                },
+            ]
+        };
+
+        // ── run A：未批准 → Block，事件携带签名，工具未执行 ──
+        let executions_a = Arc::new(AtomicUsize::new(0));
+        let mut registry_a = ToolRegistry::new();
+        registry_a.register(Box::new(CountingEditTool {
+            executions: executions_a.clone(),
+        }));
+        let mut frozen_a = contract.clone();
+        frozen_a.freeze();
+        let mut agent_a = Agent::new(Box::new(MockLLM::new(responses())), registry_a)
+            .with_active_task_provider(|| Some("task-b1-deviation".to_string()));
+        agent_a.preinstall_goal_contract(frozen_a);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(128);
+        agent_a
+            .chat("把 src/ui/App.tsx 里的 a 改成 b".to_string(), tx)
+            .await
+            .expect("blocked run still completes");
+        assert_eq!(
+            executions_a.load(Ordering::SeqCst),
+            0,
+            "blocked action must not execute"
+        );
+        let mut blocked_signature: Option<(String, String)> = None;
+        while let Ok(event) = rx.try_recv() {
+            if let AgentEvent::AtlasDeviationBlocked {
+                target, violations, ..
+            } = event
+            {
+                blocked_signature = Some((violations[0].item_id.clone(), target));
+            }
+        }
+        let (item_id, target) = blocked_signature.expect("Block must emit the approval signature");
+        assert_eq!(target, "path:src/ui/App.tsx");
+
+        // ── run B：批准重装（命令层路径的等价模拟）→ 放行执行 + 披露留痕 ──
+        let executions_b = Arc::new(AtomicUsize::new(0));
+        let mut registry_b = ToolRegistry::new();
+        registry_b.register(Box::new(CountingEditTool {
+            executions: executions_b.clone(),
+        }));
+        let audits: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let audits_sink = audits.clone();
+        let mut frozen_b = contract.clone();
+        frozen_b.freeze();
+        let mut agent_b = Agent::new(Box::new(MockLLM::new(responses())), registry_b)
+            .with_active_task_provider(|| Some("task-b1-deviation".to_string()))
+            .with_tool_audit_sink(move |event: AgentToolAuditEvent| {
+                audits_sink.lock().unwrap().push(event.reason);
+            });
+        agent_b.preinstall_goal_contract(frozen_b);
+        agent_b.preinstall_deviation_approvals([(item_id, target)]);
+        let (tx, mut _rx) = tokio::sync::mpsc::channel(128);
+        agent_b
+            .chat("把 src/ui/App.tsx 里的 a 改成 b".to_string(), tx)
+            .await
+            .expect("approved run completes");
+        assert_eq!(
+            executions_b.load(Ordering::SeqCst),
+            1,
+            "approved action must execute exactly once"
+        );
+        assert!(
+            audits
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "atlas_approved_deviation"),
+            "approval must leave a mechanical disclosure in the audit trail"
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_contract_tool_freezes_installs_and_persists() {
+        // Step 1 端到端：模型调用 atlas_freeze_goal_contract（不打印文本块）→
+        // 工具冻结契约 → core 消费 Success 结果装进 harness → persist sink
+        // 在同一时刻拿到契约 →（模拟重建）重装后 preserve 路径仍被 Block。
+        use crate::agent::atlas_harness::glue::proposed_action_from_tool_call;
+        use crate::agent::atlas_harness::{GoalContract, HarnessGate};
+
+        let mock = Box::new(MockLLM::new(vec![
+            ChatResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call-freeze-1".to_string(),
+                    name: "atlas_freeze_goal_contract".to_string(),
+                    arguments: serde_json::json!({
+                        "goal": "ship X",
+                        "must_do": [ { "id": "M1", "text": "implement X" } ],
+                        "preserve": [
+                            { "id": "P1", "text": "keep src/ui/**", "kind": "layout_structure", "path_glob": "src/ui/**" }
+                        ],
+                        "in_scope": ["src/x"]
+                    }),
+                }],
+                finish_reason: "tool_calls".to_string(),
+                usage: None,
+            },
+            ChatResponse {
+                content: Some("契约已冻结，等待进一步指示。".to_string()),
+                tool_calls: vec![],
+                finish_reason: "stop".to_string(),
+                usage: None,
+            },
+        ]));
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(crate::tools::FreezeGoalContractTool));
+
+        let persisted: Arc<Mutex<Option<GoalContract>>> = Arc::new(Mutex::new(None));
+        let persisted_sink = persisted.clone();
+        let mut agent = Agent::new(mock, registry).with_contract_persist_sink(
+            move |contract: &GoalContract| {
+                *persisted_sink.lock().unwrap() = Some(contract.clone());
+            },
+        );
+        let (tx, mut _rx) = tokio::sync::mpsc::channel(64);
+        agent
+            .chat("请按确认后的目标契约冻结".to_string(), tx)
+            .await
+            .expect("structured freeze run should complete");
+
+        // 1) 本 Agent 的 harness 已被结构化通道武装（默认 guards 注入）。
+        {
+            let harness = agent
+                .atlas
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let contract = harness.contract().expect("contract must be installed");
+            assert!(contract.frozen);
+            assert!(contract.must_not_do.iter().any(|i| i.id == "N-hide"));
+            assert!(harness.is_active());
+        }
+
+        // 2) persist sink 在安装时刻被调用。
+        let captured = persisted
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("persist sink must receive the frozen contract");
+        assert!(captured.frozen);
+
+        // 3) 模拟会话重入：重装后 preserve 路径仍被 Block（A6 链路与
+        //    结构化通道拼成完整闭环）。
+        let rebuilt = Agent::new(Box::new(MockLLM::new(vec![])), ToolRegistry::new());
+        rebuilt.preinstall_goal_contract(captured);
+        let harness = rebuilt
+            .atlas
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let action = proposed_action_from_tool_call(
+            "str_replace",
+            &serde_json::json!({ "path": "src/ui/App.tsx", "old_str": "a", "new_str": "b" }),
+        );
+        assert!(matches!(
+            harness.gate_action(&action),
+            HarnessGate::Block { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn contract_persist_sink_fires_and_rehydrated_harness_still_gates() {
+        // A6 end-to-end: run A 的模型打印契约 → 冻结进内存 harness 的同一时刻
+        // persist sink 拿到契约 →（模拟 AgentCore 重建）全新 Agent 重装该契约
+        // → 对 preserve 路径的 mutating action 仍被 Block。
+        use crate::agent::atlas_harness::glue::proposed_action_from_tool_call;
+        use crate::agent::atlas_harness::{GoalContract, HarnessGate};
+
+        let contract_text = "Atlas Goal Contract\n\
+            Goal:\n- ship X\n\
+            Must Do:\n- [M1] implement X (hard)\n\
+            Preserve:\n- [P1] keep src/ui/** (layout)\n\
+            In Scope:\n- src/x\n\
+            ATLAS_STOP";
+        let mock = Box::new(MockLLM::new(vec![ChatResponse {
+            content: Some(format!("收到，目标契约如下：\n{contract_text}")),
+            tool_calls: vec![],
+            finish_reason: "stop".to_string(),
+            usage: None,
+        }]));
+
+        let persisted: Arc<Mutex<Option<GoalContract>>> = Arc::new(Mutex::new(None));
+        let persisted_sink = persisted.clone();
+        let mut agent = Agent::new(mock, ToolRegistry::new()).with_contract_persist_sink(
+            move |contract: &GoalContract| {
+                *persisted_sink.lock().unwrap() = Some(contract.clone());
+            },
+        );
+        let (tx, mut _rx) = tokio::sync::mpsc::channel(64);
+        agent
+            .chat("请按 Atlas 流程冻结契约".to_string(), tx)
+            .await
+            .expect("run A should complete");
+
+        // 1) sink 在冻结时刻被调用，且内容已冻结、含 preserve 项。
+        let captured = persisted
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("persist sink must receive the frozen contract");
+        assert!(captured.frozen);
+        assert!(captured.has_hard_constraints());
+        assert!(captured.preserve.iter().any(|p| p.id == "P1"));
+
+        // 2) 模拟会话重入：全新 Agent（空 harness）重装持久化契约。
+        let rebuilt = Agent::new(Box::new(MockLLM::new(vec![])), ToolRegistry::new());
+        {
+            let harness = rebuilt
+                .atlas
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert!(harness.contract().is_none(), "fresh harness starts empty");
+        }
+        rebuilt.preinstall_goal_contract(captured);
+
+        // 3) 重装后的 harness 对 preserve 路径的写动作仍然 Block。
+        let harness = rebuilt
+            .atlas
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(harness.is_active(), "rehydrated harness must be armed");
+        let action = proposed_action_from_tool_call(
+            "str_replace",
+            &serde_json::json!({ "path": "src/ui/App.tsx", "old_str": "a", "new_str": "b" }),
+        );
+        assert!(matches!(
+            harness.gate_action(&action),
+            HarnessGate::Block { .. }
+        ));
     }
 
     struct UsedConnReportingLLM {

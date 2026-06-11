@@ -76,6 +76,8 @@ fn create_tool_registry_with_runtime(
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     let project_roots = project_root.into_iter().collect::<Vec<_>>();
+    // Step 1（契约结构化通道）：无外部依赖的规划层工具，最先注册。
+    registry.register(Box::new(tools::FreezeGoalContractTool));
     let command_isolation =
         crate::tools::CommandIsolationPolicy::from_config(&execution_isolation, &project_roots);
     registry.register(Box::new(tools::ReadFileTool::new(project_roots.clone())));
@@ -389,6 +391,7 @@ pub fn run() {
             commands::get_agent_tool_audit_events,
             commands::get_agent_permission_decisions,
             commands::resolve_permission_confirmation,
+            commands::resolve_atlas_deviation,
             commands::retry_agent_run,
             commands::start_feishu_callback_server,
             commands::stop_feishu_callback_server,
@@ -402,8 +405,6 @@ pub fn run() {
             commands::ingest_feishu_event_payload,
             commands::get_config,
             commands::save_config,
-            commands::delete_model_connection,
-            commands::reveal_model_connection_key,
             commands::get_backend_status,
             commands::write_settings_smoke_proof,
             commands::write_settings_persistence_smoke_proof,
@@ -692,6 +693,7 @@ mod tests {
             "browser_automation",
             "invoke_mcp_tool",
             "add_memory",
+            "atlas_freeze_goal_contract",
             // M2+M3 plan_tasks runtime additions
             "create_plan",
             "create_plan_task",
