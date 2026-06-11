@@ -402,6 +402,8 @@ pub fn run() {
             commands::ingest_feishu_event_payload,
             commands::get_config,
             commands::save_config,
+            commands::delete_model_connection,
+            commands::reveal_model_connection_key,
             commands::get_backend_status,
             commands::write_settings_smoke_proof,
             commands::write_settings_persistence_smoke_proof,

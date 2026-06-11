@@ -181,6 +181,88 @@ pub async fn save_config(
 }
 
 #[tauri::command]
+pub async fn delete_model_connection(
+    connection_id: String,
+    state: State<'_, AppState>,
+) -> Result<Config, String> {
+    let connection_id = connection_id.trim().to_string();
+    if connection_id.is_empty() {
+        return Err("connection_id is required".to_string());
+    }
+
+    let current = state.config.lock().await.clone();
+    let mut config = current.clone();
+    let removed = config
+        .llm
+        .connections
+        .iter()
+        .find(|connection| connection.id == connection_id)
+        .cloned()
+        .ok_or_else(|| format!("model connection not found: {connection_id}"))?;
+
+    config
+        .llm
+        .connections
+        .retain(|connection| connection.id != connection_id);
+
+    if config.llm.default_connection_id.as_deref() == Some(connection_id.as_str()) {
+        config.llm.default_connection_id = config
+            .llm
+            .connections
+            .first()
+            .map(|connection| connection.id.clone());
+    }
+
+    if !config
+        .llm
+        .connections
+        .iter()
+        .any(|connection| connection.provider_id == removed.provider_id)
+    {
+        match removed.provider_id.as_str() {
+            "openai" => config.llm.openai = None,
+            "anthropic" => config.llm.anthropic = None,
+            _ => {}
+        }
+    }
+
+    if config.llm.connections.is_empty() {
+        config.llm.default_connection_id = None;
+        config.llm.openai = None;
+        config.llm.anthropic = None;
+    } else {
+        config.llm.sync_legacy_slots_from_connections();
+    }
+
+    config.save().map_err(|error| error.to_string())?;
+    crate::tools::outbound::set_active_policy(config.outbound.clone());
+    let redacted = config.redacted_for_client();
+    let mut state_config = state.config.lock().await;
+    *state_config = config;
+    Ok(redacted)
+}
+
+#[tauri::command]
+pub async fn reveal_model_connection_key(
+    connection_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let connection_id = connection_id.trim();
+    if connection_id.is_empty() {
+        return Err("connection_id is required".to_string());
+    }
+
+    let config = state.config.lock().await;
+    let connection = config
+        .llm
+        .connections
+        .iter()
+        .find(|connection| connection.id == connection_id)
+        .ok_or_else(|| format!("model connection not found: {connection_id}"))?;
+    Ok(connection.api_key.clone())
+}
+
+#[tauri::command]
 pub async fn get_backend_status(state: State<'_, AppState>) -> Result<BackendStatus, String> {
     let config = state.config.lock().await;
     let active = config.llm.active_connection();

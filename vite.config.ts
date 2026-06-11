@@ -1,10 +1,8 @@
 import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
-// Matches the existing src-tauri/tauri.conf.json:
-//   devUrl: "http://localhost:1420"   frontendDist: "../dist"
-// Add to tauri.conf.json "build" so `tauri dev` / `tauri build` drive Vite:
-//   "beforeDevCommand": "npm run dev", "beforeBuildCommand": "npm run build"
 export default defineConfig({
+  plugins: [react()],
   clearScreen: false,
   server: {
     port: 1420,
