@@ -53,10 +53,15 @@ impl Tool for InvokeMcpTool {
                 "外部工具".to_string(),
                 "需确认".to_string(),
             ],
-            safety_label_zh: "敏感".to_string(),
             capabilities: vec![ToolCapability::Network],
+            safety_label_zh: "敏感".to_string(),
             safety_level: ToolSafetyLevel::Sensitive,
-            mutates_state: false,
+            // 修复（中高）：MCP 工具可以产生任意副作用（写文件、发请求、改外部
+            // 系统）。mutates_state=false 会让 infer_tool_action 把它分类成
+            // Read：只读子代理（Reviewer/Planner）因此能调 MCP 写工具，权限层
+            // 对它也完全不设防。按 fail-closed 原则按写处理；真正只读的 MCP
+            // 调用多走一次结构比对没有代价（无路径/命令参数时不会触发任何违例）。
+            mutates_state: true,
             requires_confirmation: true,
         }
     }

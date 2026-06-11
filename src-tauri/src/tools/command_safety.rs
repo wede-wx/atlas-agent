@@ -46,11 +46,18 @@ const DENY_FRAGMENTS: &[&str] = &[
 /// Allowlist of safe leading commands. Match is on the FIRST whitespace-delimited
 /// token only (case-folded). Subcommands like `git status` are gated additionally
 /// in `git_allowlisted_subcommand`.
+/// 修复（中高）：`env` / `printenv` 从白名单移除——它们把整份环境变量
+/// （常含 API key）免确认拉进模型上下文；输出端的 P0-1 掩码只认识已知
+/// 模式，不该是唯一防线。降级为 NeedsConfirm（走兜底分支）。
 const ALLOWLIST_BARE: &[&str] = &[
     "ls", "dir", "pwd", "echo", "cat", "type", "head", "tail", "wc", "whoami", "hostname", "date",
-    "uname", "which", "where", "true", "false", "printenv", "env",
+    "uname", "which", "where", "true", "false",
 ];
 
+/// 修复（中高）：`config` 从 git 白名单移除。`git config` 是写操作，而且
+/// `git config core.hooksPath <dir>` 能让全部钩子静默失效——这是不出现
+/// `--no-verify` 字样的击穿验证手段（ContractGate 已把它列为硬锚，这里
+/// 同步收口：至少要过 prepare/confirm）。
 const GIT_ALLOWLIST_SUBCMDS: &[&str] = &[
     "status",
     "log",
@@ -59,7 +66,6 @@ const GIT_ALLOWLIST_SUBCMDS: &[&str] = &[
     "branch",
     "tag",
     "remote",
-    "config",
     "rev-parse",
     "ls-files",
     "ls-tree",
@@ -71,9 +77,12 @@ const CARGO_ALLOWLIST_SUBCMDS: &[&str] = &[
     "check", "build", "test", "fmt", "clippy", "doc", "tree", "metadata", "version", "-v", "-V",
 ];
 
+/// 修复（中高）：`run` 从 npm/pnpm/yarn 白名单移除。`npm run <script>`
+/// 执行的是 package.json 里的任意 shell 脚本——“白名单”对脚本内容毫无
+/// 约束力，等于把任意命令免确认放行。`npm test` 保留（约定俗成的验证
+/// 入口，且 verify 体系依赖它低摩擦可用）。
 const NPM_ALLOWLIST_SUBCMDS: &[&str] = &[
     "test",
-    "run",
     "list",
     "ls",
     "view",
@@ -292,6 +301,25 @@ mod tests {
             classify_command("cargo install foo"),
             CommandSafety::NeedsConfirm
         );
+    }
+
+    #[test]
+    fn arbitrary_script_and_config_writes_left_the_allowlist() {
+        // npm run = 任意 package.json 脚本；git config 可改写 hooksPath；
+        // env/printenv 整份倾倒环境变量。三者都必须走 prepare/confirm。
+        assert_eq!(
+            classify_command("npm run deploy"),
+            CommandSafety::NeedsConfirm
+        );
+        assert_eq!(
+            classify_command("git config core.hooksPath /tmp/empty"),
+            CommandSafety::NeedsConfirm
+        );
+        assert_eq!(classify_command("env"), CommandSafety::NeedsConfirm);
+        assert_eq!(classify_command("printenv"), CommandSafety::NeedsConfirm);
+        // 验证入口保持低摩擦。
+        assert_eq!(classify_command("npm test"), CommandSafety::Allowlisted);
+        assert_eq!(classify_command("git status"), CommandSafety::Allowlisted);
     }
 
     #[test]

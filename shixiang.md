@@ -203,3 +203,41 @@ ame: matches destination folder, installed content hash matches source.
 - 已发现并修复：首次验证暴露 `GraphTab` props 的 TS 窄化错误，已改为以 `currentRun` 做显式非空判断后重新验证通过。
 - 未验证：尚未在真实 Tauri 窗口发送消息后手点右抽屉三个标签；尚未验证真实 run 是否包含 graphRunId；尚未验证真实 `needs_confirm` 记录的批准/拒绝在后端账本中的写入效果。
 - 需用户手测：发一条会产生 run 的消息后打开右抽屉，检查最近 run 是否加载、时间线是否分页、契约账本是否显示、运行图在无 graphRunId 时是否真实空态。
+
+## Backend hardening branch attempt (2026-06-11)
+
+- User selected baseline commit + isolated branch flow.
+- Baseline commit on `main`: `f40727f chore: snapshot atlas frontend baseline`.
+- Created and switched to isolated branch: `backend-harden`.
+- Replaced the 10 requested backend files from pasted attachments on `backend-harden` only:
+  - `src-tauri/src/agent/atlas_harness/glue.rs`
+  - `src-tauri/src/agent/atlas_harness/contract_gate.rs`
+  - `src-tauri/src/agent/atlas_harness/path_match.rs`
+  - `src-tauri/src/agent/atlas_harness/impact_evidence.rs`
+  - `src-tauri/src/agent/atlas_harness/completion_gate.rs`
+  - `src-tauri/src/tools/mcp.rs`
+  - `src-tauri/src/tools/policy.rs`
+  - `src-tauri/src/tools/command_safety.rs`
+  - `src-tauri/src/tools/plan_tasks.rs`
+  - `src-tauri/src/agent/core.rs`
+- `src-tauri/src/agent/atlas_harness/mod.rs` already had `pub mod path_match;`, so no module declaration change was needed.
+- Validation stopped at `cargo build`: failed before tests. `cargo test` was not run because the contract required stopping on compile failure.
+- Primary build failure starts at `src/agent/core.rs:60-61`: `pub type PostCommandVerifyHook = Arc` followed by `dyn Fn(...)`, causing `expected one of ..., found keyword dyn`. Subsequent unresolved imports (`Agent`, `ContextBuilder`, `AgentUsageEvent`) appear downstream from `core.rs` failing to parse/export.
+- No business/security logic in the pasted backend files was modified to make it compile.
+- Honest status: isolated branch has pasted hardening files applied, but backend hardening is blocked by compile failure; main baseline remains available at commit `f40727f`.
+
+## Backend hardening branch validation passed after syntax-level paste repair (2026-06-11)
+
+- Branch: `backend-harden`.
+- Baseline available on `main`: commit `f40727f chore: snapshot atlas frontend baseline`.
+- User authorized strictly limited paste-damage repair after first `cargo build` failure.
+- Only repaired confirmed transmission damage in `src-tauri/src/agent/core.rs`: restored missing generic angle brackets in `PostCommandVerifyHook` (`Arc<...>`, `Pin<...>`, `Box<...>`). No function body logic, harness gate logic, policy semantics, command safety semantics, or plan task semantics were changed.
+- Re-ran `cargo build`: passed.
+- Re-ran `cargo test`: passed. Summary: `616 passed; 0 failed; 2 ignored`; lib/main/doc-test harnesses with 0 tests also passed.
+- Required new tests observed green:
+  - `agent::atlas_harness::glue::tests::mcp_invocation_unwraps_nested_arguments_and_is_gated`
+  - `agent::atlas_harness::contract_gate::tests::quoted_no_verify_is_still_a_hard_block`
+  - `tools::plan_tasks::tests::explicit_verified_without_artifact_is_blocked`
+  - `tools::policy::tests::full_access_allows_everything_without_approval`
+  - `agent::atlas_harness::contract_gate::tests::hookspath_rewire_is_a_hard_block`
+- Honest status: backend hardening replacement is validated on isolated branch but not merged to `main` yet. Branch still contains uncommitted hardening file changes unless explicitly committed/merged later.

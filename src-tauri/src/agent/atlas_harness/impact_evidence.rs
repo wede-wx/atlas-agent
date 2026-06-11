@@ -41,15 +41,22 @@ pub fn requires_evidence(
     ledger: &ImpactLedger,
 ) -> Option<EvidenceRequirement> {
     let path = action.target_path.as_ref()?;
-    if !is_mutating_name(&action.kind_raw) {
+    // 修复（高）：原先用名字子串 is_mutating_name() 判定，一个名字不含
+    // write/edit/delete 的写工具（典型：MCP 写工具）会整体跳过本闸——
+    // 与 ContractGate 修过的同一个 fail-open 洞。改用统一的 fail-closed
+    // 判定 ProposedAction::is_mutating()（含 assume_mutating）。
+    if !action.is_mutating() {
         return None;
     }
-    // 在 in_scope 明确列出 → 不要求(契约已为它背书)
+    // 在 in_scope 明确列出 → 不要求(契约已为它背书)。
+    // 修复（中）：原先 path.contains(entry) 是裸子串，in_scope "src/x" 会
+    // 背书 "tests/src/xylophone.rs"（fail-open 方向的过宽）。改为与
+    // out_of_scope 同一套边界感知匹配。
     let in_scope = contract
         .scope
         .in_scope
         .iter()
-        .any(|s| path.contains(s.as_str()))
+        .any(|s| super::path_match::path_under_entry(s, path))
         || contract
             .must_do
             .iter()
@@ -67,15 +74,6 @@ pub fn requires_evidence(
     })
 }
 
-fn is_mutating_name(name: &str) -> bool {
-    let n = name.to_lowercase();
-    n.contains("write")
-        || n.contains("edit")
-        || n.contains("create_file")
-        || n.contains("delete")
-        || n.contains("patch")
-}
-
 fn file_stem(path: &str) -> String {
     path.rsplit('/')
         .next()
@@ -87,7 +85,10 @@ fn file_stem(path: &str) -> String {
 }
 
 fn normalize(s: String) -> String {
-    s.trim().trim_start_matches("./").to_string()
+    // 与 ContractGate 同源的词法归一化：`./`、`..`、反斜杠、绝对前缀。
+    // 旧实现只剥 "./"，`src\x.rs` 扫过之后再用 `src/x.rs` 来改仍然要求重扫。
+    let n = super::path_match::normalize_rel_path(s.trim());
+    n.trim_start_matches('/').to_string()
 }
 
 #[cfg(test)]
@@ -111,6 +112,42 @@ mod tests {
         assert!(req.is_some());
         assert!(req.unwrap().suggested_command.contains("enums"));
         ledger.record_scan("src/shared/enums.rs");
+        assert!(requires_evidence(&a, &c(), &ledger).is_none());
+    }
+
+    #[test]
+    fn unknown_named_write_tool_is_gated_for_evidence() {
+        // 名字不含 write/edit/...，但参数 writeful → 必须出证据。
+        let a = ProposedAction {
+            kind_raw: "mcp_fs_apply".into(),
+            target_path: Some("src/shared/util.rs".into()),
+            content_or_diff: Some("x".into()),
+            ..Default::default()
+        };
+        assert!(requires_evidence(&a, &c(), &ImpactLedger::default()).is_some());
+    }
+
+    #[test]
+    fn in_scope_substring_lookalike_is_not_endorsed() {
+        // "src/feature" 不能背书 "tests/src/featurex.rs"。
+        let a = ProposedAction {
+            kind_raw: "edit_file".into(),
+            target_path: Some("src/featurex/x.rs".into()),
+            content_or_diff: Some("x".into()),
+            ..Default::default()
+        };
+        assert!(requires_evidence(&a, &c(), &ImpactLedger::default()).is_some());
+    }
+
+    #[test]
+    fn scan_record_survives_path_obfuscation() {
+        let a = ProposedAction {
+            kind_raw: "edit_file".into(),
+            target_path: Some("src/shared/enums.rs".into()),
+            ..Default::default()
+        };
+        let mut ledger = ImpactLedger::default();
+        ledger.record_scan("./src/shared/enums.rs");
         assert!(requires_evidence(&a, &c(), &ledger).is_none());
     }
 

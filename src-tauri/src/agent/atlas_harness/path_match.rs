@@ -141,6 +141,41 @@ pub fn path_matches_glob(glob: &str, path: &str) -> bool {
     false
 }
 
+/// Boundary-aware "does `path` fall under `entry`" test shared by the
+/// scope checks (ContractGate's out_of_scope, ImpactEvidenceGate's in_scope).
+/// Glob entries go through the glob matcher; plain entries match as a
+/// path-segment prefix or a whole segment — never as a raw substring, so
+/// `src/legacy` matches `src/legacy/x.rs` but not `src/legacyx.rs`, and
+/// `src/x` does not match `tests/src/xylophone.rs`.
+pub fn path_under_entry(entry: &str, path: &str) -> bool {
+    if entry.contains('*') || entry.contains('?') {
+        return path_matches_glob(entry, path);
+    }
+    let np = normalize_rel_path(path);
+    let ne = normalize_rel_path(entry);
+    let np = np.trim_start_matches('/');
+    let ne = ne.trim_start_matches('/');
+    if ne.is_empty() {
+        return false;
+    }
+    if np == ne || np.starts_with(&format!("{ne}/")) {
+        return true;
+    }
+    // 绝对路径 / 嵌套根：按段后缀对齐再比一次（与 path_matches_glob 同思路）。
+    if ne.contains('/') {
+        let segs: Vec<&str> = np.split('/').filter(|s| !s.is_empty()).collect();
+        for start in 0..segs.len() {
+            let suffix = segs[start..].join("/");
+            if suffix == ne || suffix.starts_with(&format!("{ne}/")) {
+                return true;
+            }
+        }
+        false
+    } else {
+        np.split('/').any(|seg| seg == ne)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +206,17 @@ mod tests {
         assert!(path_matches_glob("src/ui/**", "src/ui/nested/deep/X.tsx"));
         assert!(path_matches_glob("**/*.test.ts", "src/a/b.test.ts"));
         assert!(path_matches_glob("src/*/index.ts", "src/foo/index.ts"));
+    }
+
+    #[test]
+    fn path_under_entry_is_boundary_aware() {
+        assert!(path_under_entry("src/feature", "src/feature/x.rs"));
+        assert!(path_under_entry("src/feature", "./src/feature/x.rs"));
+        assert!(path_under_entry("src/feature", "/abs/proj/src/feature/x.rs"));
+        assert!(path_under_entry("tests", "src/app/tests/unit.rs"));
+        assert!(!path_under_entry("src/feature", "src/featurex/x.rs"));
+        assert!(!path_under_entry("src/x", "tests/src/xylophone.rs"));
+        assert!(path_under_entry("src/ui/**", "src/ui/App.tsx"));
     }
 
     #[test]

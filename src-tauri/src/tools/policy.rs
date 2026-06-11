@@ -97,9 +97,13 @@ impl PolicyEngine {
                 AgentPermissionMode::Default => PolicyDecision::Deny {
                     reason: "默认模式不会执行破坏性操作。".to_string(),
                 },
-                AgentPermissionMode::FullAccess => PolicyDecision::RequireApproval {
-                    reason: "这个操作可能造成破坏性影响，需要你确认。".to_string(),
-                },
+                // 行为变更：完全访问模式不再逐动作审批，破坏性动作直接放行。
+                // 被移除的只是“权限层审批”这一道；以下边界全部保留：
+                //   1) Atlas 目标保真闸（ContractGate 等四道）照常拦截；
+                //   2) command_safety 的 Denied 级硬拒绝（rm -rf /、强制 push 等）
+                //      在任何模式下仍然拒绝；
+                //   3) 子代理角色收紧（SubAgentRole::restrict）不受会话模式影响。
+                AgentPermissionMode::FullAccess => PolicyDecision::Allow,
             };
         }
 
@@ -128,14 +132,9 @@ impl PolicyEngine {
                     reason: "默认模式不会执行系统级操作。".to_string(),
                 },
             },
-            AgentPermissionMode::FullAccess => match action {
-                PolicyAction::Read | PolicyAction::Write | PolicyAction::Command => {
-                    PolicyDecision::Allow
-                }
-                PolicyAction::Delete | PolicyAction::System => PolicyDecision::RequireApproval {
-                    reason: "系统级、删除或高风险操作仍需要你确认。".to_string(),
-                },
-            },
+            // 行为变更：完全访问模式对所有动作类型直接放行（含 Delete/System），
+            // 不再要求逐动作审批。目标保真与命令安全的硬性边界另行保留。
+            AgentPermissionMode::FullAccess => PolicyDecision::Allow,
         }
     }
 
@@ -484,14 +483,39 @@ mod tests {
     }
 
     #[test]
-    fn full_access_allows_normal_commands_but_not_destructive_without_approval() {
+    fn full_access_allows_everything_without_approval() {
+        // 行为变更：完全访问模式不再逐动作审批。命令安全网关的 Denied 级
+        // 硬拒绝与 Atlas 目标保真闸在工具内部 / 分发点另行兜底。
         let engine = PolicyEngine::new(AgentPermissionMode::FullAccess);
-        assert!(engine
-            .evaluate(PolicyAction::Command, PolicyRisk::Sensitive)
-            .is_allowed());
+        for action in [
+            PolicyAction::Read,
+            PolicyAction::Write,
+            PolicyAction::Command,
+            PolicyAction::Delete,
+            PolicyAction::System,
+        ] {
+            for risk in [
+                PolicyRisk::Safe,
+                PolicyRisk::Sensitive,
+                PolicyRisk::Destructive,
+            ] {
+                assert!(
+                    engine.evaluate(action, risk).is_allowed(),
+                    "full_access should allow {action:?}/{risk:?} without approval"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_access_keeps_subagent_role_tightening() {
+        // 完全访问会话里，只读子代理依然不能写——角色收紧与模式放行正交。
+        let engine = PolicyEngine::new(AgentPermissionMode::FullAccess);
+        let base = engine.evaluate_tool_execution(&write_tool());
+        assert!(base.is_allowed());
         assert!(matches!(
-            engine.evaluate(PolicyAction::Command, PolicyRisk::Destructive),
-            PolicyDecision::RequireApproval { .. }
+            SubAgentRole::Reviewer.restrict(base, &write_tool()),
+            PolicyDecision::Deny { .. }
         ));
     }
 

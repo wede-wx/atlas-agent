@@ -391,6 +391,43 @@ impl Tool for UpdatePlanTaskTool {
             .map(str::to_string);
         let blocked_reason = args.get("blocked_reason").and_then(Value::as_str);
 
+        // ── Atlas CompletionGate 接线（修复源码标注的 TODO 后门）──────────
+        // 模型显式声明 evidence_status=verified 时，必须有至少一条 passed 的
+        // run_task_verifications 记录绑定到这个 task。否则“声称完成”就是凭
+        // 自评落库——这正是 final_audit.rs 标注待补、completion_gate 只有
+        // 测试调用的那个后门。规则本体见
+        // atlas_harness::completion_gate::verified_claim_is_bound。
+        // `waived` 不在此列：它是显式、带 change_reason、可审计的逃生口。
+        if explicit_status.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("verified")) {
+            let passed_count = self
+                .db
+                .list_task_verifications(&task_id)
+                .map_err(|e| AgentError::Tool(e.to_string()))?
+                .iter()
+                .filter(|record| record.status == "passed")
+                .count();
+            if !crate::agent::atlas_harness::completion_gate::verified_claim_is_bound(
+                "verified",
+                passed_count,
+            ) {
+                let mut result = ToolResult::recoverable_error(
+                    "Atlas 完成闸拦截：声明 evidence_status=verified，但该任务没有任何一条通过的 run_verify 验证记录——拒绝凭自评标记验证通过。",
+                    vec![
+                        "先用 run_verify 跑该任务的验证命令，产生真实验证产物。".to_string(),
+                        "验证通过后再回写 evidence_status=verified。".to_string(),
+                        "如果这个任务确实不需要验证，用 evidence_status=waived 并在 change_reason 里写明原因。"
+                            .to_string(),
+                    ],
+                );
+                result.data = json!({
+                    "taskId": task_id,
+                    "reason": "verified_claim_unbound",
+                    "expected": "至少一条 status=passed 的 run_task_verifications 记录。",
+                });
+                return Ok(result);
+            }
+        }
+
         if let Some(status) = raw_status {
             // T7.2 — hard gate: refuse to mark `done` without real evidence or an
             // explicit verified/waived evidence_status. Soft-pending was leaking
@@ -892,6 +929,97 @@ mod tests {
             Some("verified"),
         );
         assert_eq!(result.data["task"]["status"].as_str(), Some("done"));
+    }
+
+    #[tokio::test]
+    async fn explicit_verified_without_artifact_is_blocked() {
+        // Atlas CompletionGate 接线：模型直接声明 evidence_status=verified、
+        // 但库里没有任何通过的验证记录 → 拒绝（这是被补上的后门）。
+        let (_path, db, session_id) = setup_db();
+        let task = db
+            .create_plan_task_full(
+                &session_id,
+                "self-claimed verified",
+                None,
+                None,
+                "test",
+                None,
+                None,
+            )
+            .expect("create");
+        let update = UpdatePlanTaskTool::new(db.clone(), Some(session_id.clone()));
+        let result = update
+            .execute(json!({
+                "task_id": task.id,
+                "status": "done",
+                "evidence": { "kind": "claim", "details": "我觉得做完了" },
+                "evidence_status": "verified",
+                "change_reason": "测试自评 verified 拦截"
+            }))
+            .await
+            .expect("returns ok envelope");
+        assert!(matches!(
+            result.status,
+            crate::agent::ToolResultStatus::Error
+        ));
+        assert_eq!(
+            result.data["reason"].as_str(),
+            Some("verified_claim_unbound")
+        );
+        // 任务不能被推进到 done。
+        let fetched = db.get_plan_task(&task.id).expect("fetch");
+        assert_ne!(fetched.status, "done");
+        assert_ne!(fetched.evidence_status, "verified");
+    }
+
+    #[tokio::test]
+    async fn explicit_verified_with_passed_artifact_is_allowed() {
+        let (_path, db, session_id) = setup_db();
+        let task = db
+            .create_plan_task_full(
+                &session_id,
+                "verified with artifact",
+                None,
+                None,
+                "test",
+                None,
+                None,
+            )
+            .expect("create");
+        let now = 1_700_000_000_000i64;
+        db.record_task_verification(
+            &task.id,
+            None,
+            "rust_check",
+            "cargo check",
+            Some(0),
+            "passed",
+            "ok",
+            "",
+            now,
+            Some(now),
+        )
+        .expect("record verification");
+        let update = UpdatePlanTaskTool::new(db.clone(), Some(session_id.clone()));
+        let result = update
+            .execute(json!({
+                "task_id": task.id,
+                "status": "done",
+                "evidence": { "kind": "verify", "details": "cargo check passed" },
+                "evidence_status": "verified",
+                "change_reason": "测试绑定真实验证产物"
+            }))
+            .await
+            .expect("ok");
+        assert!(matches!(
+            result.status,
+            crate::agent::ToolResultStatus::Success
+        ));
+        assert_eq!(result.data["task"]["status"].as_str(), Some("done"));
+        assert_eq!(
+            result.data["task"]["evidenceStatus"].as_str(),
+            Some("verified")
+        );
     }
 
     #[tokio::test]

@@ -725,15 +725,13 @@ impl Agent {
                     },
                 );
             }
-            let response_content = chat_response_content_for_tool_turn(
-                response.content,
-                normalized_tool_calls.is_empty(),
-            );
-
-            if let Some(content) = &response_content {
-                messages.push(Message::plain(Role::Assistant, content.clone()));
-
-                // ── Atlas：尚未冻结契约时，从本次 assistant 文本抽取并冻结 ──
+            // ── Atlas：契约抽取必须看“原始” assistant 文本，且在丢弃之前 ──
+            // 工具轮的 content 会被 chat_response_content_for_tool_turn 丢成
+            // None（content_dropped_for_tool_turn）。模型在同一轮里既打印契约
+            // 又直接开始调工具——恰好是“没在 Gate Mode 停下”的失败形态——时，
+            // 如果只在 response_content 上抽取，契约会随文本一起丢失，harness
+            // 整个 session 不设防。所以这里先抽取冻结，再做工具轮的内容裁剪。
+            {
                 let need_contract = self
                     .atlas
                     .lock()
@@ -741,16 +739,27 @@ impl Agent {
                     .contract()
                     .is_none();
                 if need_contract {
-                    use crate::agent::atlas_harness::glue::extract_contract_block;
-                    if let Some(block) = extract_contract_block(content) {
-                        let _ = self
-                            .atlas
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .install_contract_from_skill(block);
-                        // 可选：把契约持久化到 storage，便于会话重入
+                    if let Some(raw_content) = response.content.as_deref() {
+                        use crate::agent::atlas_harness::glue::extract_contract_block;
+                        if let Some(block) = extract_contract_block(raw_content) {
+                            let _ = self
+                                .atlas
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .install_contract_from_skill(block);
+                            // 可选：把契约持久化到 storage，便于会话重入
+                        }
                     }
                 }
+            }
+
+            let response_content = chat_response_content_for_tool_turn(
+                response.content,
+                normalized_tool_calls.is_empty(),
+            );
+
+            if let Some(content) = &response_content {
+                messages.push(Message::plain(Role::Assistant, content.clone()));
             }
 
             if !rejected_unknown_tools.is_empty() && normalized_tool_calls.is_empty() {

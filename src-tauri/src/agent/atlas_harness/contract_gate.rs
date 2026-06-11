@@ -41,6 +41,18 @@
 //!
 //! The matcher logic was validated against the full bypass + false-positive
 //! corpus before this file was written.
+//!
+//! Second hardening pass (this revision)
+//! -------------------------------------
+//! 6. **Command tokens are quote-stripped.** `git commit "--no-verify"` used to
+//!    tokenize as `"--no-verify"` and miss the exact-match hard anchor.
+//! 7. **Short / indirect verification-defeat anchors.** `git commit -n` (short
+//!    for `--no-verify`), `git config core.hooksPath ...`, and any command that
+//!    touches `.git/hooks` are now hard anchors — all three silence hooks
+//!    without ever spelling `--no-verify`.
+//! 8. **`assume_mutating`.** The glue adapter marks MCP / plugin invocations as
+//!    mutating-by-default, because an external tool's side effects cannot be
+//!    inferred from its argument shape (see `glue.rs`).
 
 use super::goal_contract::{GoalContract, PreserveKind};
 use super::path_match::path_matches_glob;
@@ -68,6 +80,11 @@ pub struct ProposedAction {
     pub content_or_diff: Option<String>,
     /// Pre-edit content (old_str / old_string) when available.
     pub prior_content: Option<String>,
+    /// Fail-closed override: the dispatch adapter sets this for calls whose
+    /// side effects cannot be inferred from argument shape (MCP / plugin
+    /// invocations). When true the action is treated as mutating even if no
+    /// recognizable path/command/content argument was found.
+    pub assume_mutating: bool,
 }
 
 impl ProposedAction {
@@ -99,6 +116,9 @@ impl ProposedAction {
     /// the same definition when deciding whether a successful call counts as a
     /// read scan.
     pub fn is_mutating(&self) -> bool {
+        if self.assume_mutating {
+            return true;
+        }
         if !matches!(self.kind(), ActionKind::Other) {
             return true;
         }
@@ -154,7 +174,16 @@ const STUB_MARKERS: &[(&str, &str)] = &[
 /// Mock-family identifier roots, matched as identifier segments (not raw
 /// substrings) with a benign denylist so `mockup` does not trip the gate.
 const MOCK_ROOTS: &[&str] = &["mock", "stub", "fake", "dummy"];
-const MOCK_BENIGN: &[&str] = &["mockup", "mockups", "smock", "hammock", "mockingbird"];
+const MOCK_BENIGN: &[&str] = &[
+    "mockup",
+    "mockups",
+    "smock",
+    "hammock",
+    "mockingbird",
+    "stubborn",
+    "stubbornly",
+    "stubbornness",
+];
 
 /// Core: structurally compare one proposed action against the contract.
 /// Pure function — no LLM, no I/O.
@@ -295,6 +324,10 @@ fn command_hits(cmd: &str) -> Vec<CommandHit> {
     let toks: Vec<String> = cmd
         .to_lowercase()
         .split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&'))
+        // 引号/反引号是 shell 语法，不属于令牌本体。不剥掉的话
+        // `git commit "--no-verify"` 的令牌是 `"--no-verify"`，精确匹配失手，
+        // 一个硬锚点就这样被一对引号绕过。
+        .map(|t| t.trim_matches(|c| matches!(c, '"' | '\'' | '`')))
         .filter(|t| !t.is_empty())
         .map(|t| t.to_string())
         .collect();
@@ -314,6 +347,41 @@ fn command_hits(cmd: &str) -> Vec<CommandHit> {
             item_id: "N-test",
             item_text: "must not skip/weaken verification protecting contract items",
             why: "command marks tests as expected-fail (xfail)".into(),
+            hard: true,
+        });
+    }
+    // `git commit -n` 是 `--no-verify` 的短形式；在 git commit 语境里短旗标
+    // 簇（如 `-an`）含 `n` 同样跳过钩子。其他命令里的 `-n` 含义完全不同，
+    // 所以只有 git+commit 同时在场才触发。
+    if has("git") && has("commit") {
+        let short_no_verify = toks.iter().any(|t| {
+            t.starts_with('-') && !t.starts_with("--") && t[1..].contains('n')
+        });
+        if short_no_verify {
+            hits.push(CommandHit {
+                item_id: "N-test",
+                item_text: "must not skip/weaken verification protecting contract items",
+                why: "command skips verification hooks (git commit -n, short for --no-verify)"
+                    .into(),
+                hard: true,
+            });
+        }
+    }
+    // 改 hooksPath / 动 .git/hooks 不出现 --no-verify 字样，却能让所有钩子
+    // 永久失效——这是比 --no-verify 更隐蔽的击穿验证手段，同级硬锚。
+    if has("git") && has("config") && toks.iter().any(|t| t.contains("hookspath")) {
+        hits.push(CommandHit {
+            item_id: "N-test",
+            item_text: "must not skip/weaken verification protecting contract items",
+            why: "command rewires git hooks (git config core.hooksPath)".into(),
+            hard: true,
+        });
+    }
+    if toks.iter().any(|t| t.contains(".git/hooks")) {
+        hits.push(CommandHit {
+            item_id: "N-test",
+            item_text: "must not skip/weaken verification protecting contract items",
+            why: "command touches .git/hooks directly (can disable verification)".into(),
             hard: true,
         });
     }
@@ -352,19 +420,10 @@ fn command_hits(cmd: &str) -> Vec<CommandHit> {
 
 /// Out-of-scope hit: glob entries match via the path matcher; plain entries
 /// match as a path-segment prefix (boundary aware), not a raw substring.
+/// Delegates to the shared scope matcher so in_scope / out_of_scope use one
+/// definition of "falls under" (see `path_match::path_under_entry`).
 fn out_of_scope_hit(entry: &str, path: &str) -> bool {
-    if entry.contains('*') || entry.contains('?') {
-        return path_matches_glob(entry, path);
-    }
-    let np = super::path_match::normalize_rel_path(path);
-    let ne = super::path_match::normalize_rel_path(entry);
-    let np = np.trim_start_matches('/');
-    let ne = ne.trim_start_matches('/');
-    if ne.is_empty() {
-        return false;
-    }
-    // segment-boundary prefix: `src/legacy` matches `src/legacy/x.rs` but not `src/legacyx`.
-    np == ne || np.starts_with(&format!("{ne}/")) || np.split('/').any(|seg| seg == ne)
+    super::path_match::path_under_entry(entry, path)
 }
 
 fn looks_like_mass_deletion(action: &ProposedAction) -> bool {
@@ -479,6 +538,67 @@ mod tests {
     }
 
     #[test]
+    fn quoted_no_verify_is_still_a_hard_block() {
+        let c = contract_with_preserve();
+        let a = ProposedAction {
+            kind_raw: "bash".into(),
+            command: Some("git commit \"--no-verify\" -m wip".into()),
+            ..Default::default()
+        };
+        assert!(evaluate(&a, &c).is_block());
+    }
+
+    #[test]
+    fn git_commit_short_n_is_a_hard_block() {
+        let c = contract_with_preserve();
+        for cmd in ["git commit -n -m wip", "git commit -an -m wip"] {
+            let a = ProposedAction {
+                kind_raw: "bash".into(),
+                command: Some(cmd.into()),
+                ..Default::default()
+            };
+            assert!(evaluate(&a, &c).is_block(), "should hard-block: {cmd}");
+        }
+        // `-n` 在非 git-commit 语境下不应触发。
+        let benign = ProposedAction {
+            kind_raw: "bash".into(),
+            command: Some("grep -n pattern src/".into()),
+            ..Default::default()
+        };
+        assert_eq!(evaluate(&benign, &c), ContractDecision::Allow);
+    }
+
+    #[test]
+    fn hookspath_rewire_is_a_hard_block() {
+        let c = contract_with_preserve();
+        for cmd in [
+            "git config core.hooksPath /tmp/empty",
+            "chmod -x .git/hooks/pre-commit",
+        ] {
+            let a = ProposedAction {
+                kind_raw: "bash".into(),
+                command: Some(cmd.into()),
+                ..Default::default()
+            };
+            assert!(evaluate(&a, &c).is_block(), "should hard-block: {cmd}");
+        }
+    }
+
+    #[test]
+    fn assume_mutating_gates_argless_external_calls() {
+        let c = contract_with_preserve();
+        let a = ProposedAction {
+            kind_raw: "invoke_mcp_tool::execute_sql".into(),
+            assume_mutating: true,
+            ..Default::default()
+        };
+        assert!(a.is_mutating());
+        // 没有可识别的 path/command/content 时没有可比对的结构 → Allow，
+        // 但 mutating 定性会让 ImpactEvidenceGate / 读扫描记录走正确分支。
+        assert_eq!(evaluate(&a, &c), ContractDecision::Allow);
+    }
+
+    #[test]
     fn mockup_does_not_trip_but_mock_user_does() {
         let c = contract_with_preserve();
         let benign = ProposedAction {
@@ -511,9 +631,9 @@ mod tests {
         let a = ProposedAction {
             kind_raw: "str_replace".into(),
             target_path: Some("src/service.rs".into()),
-            command: None,
             content_or_diff: Some("// removed".into()),
             prior_content: Some(prior),
+            ..Default::default()
         };
         assert!(matches!(
             evaluate(&a, &c),

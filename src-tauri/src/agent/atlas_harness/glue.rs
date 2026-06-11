@@ -20,19 +20,59 @@ use super::contract_gate::ProposedAction;
 /// for target / command / content / prior-content. The name only provides a
 /// *hint* for `ProposedAction::kind()`; `is_mutating()` additionally infers
 /// write-ness from the arguments, so an unrecognized write tool is still gated.
+///
+/// MCP / plugin invocations (`invoke_mcp_tool`, `invoke_plugin_capability`,
+/// registered `plugin_*` tools) wrap their real arguments one level deep
+/// (`arguments` / `input`); those are unwrapped here and the whole call is
+/// treated as mutating by default (`assume_mutating`), because an external
+/// tool's side effects cannot be inferred from its argument shape.
 pub fn proposed_action_from_tool_call(tool_name: &str, args: &serde_json::Value) -> ProposedAction {
+    // ── 修复（高）：MCP / 插件入口的参数是嵌套的 ──────────────────────────
+    // `invoke_mcp_tool`            { serverId, toolName, arguments: {...} }
+    // `invoke_plugin_capability` / `plugin_*` { pluginId, capabilityId, input: {...} }
+    // 旧实现只在顶层取 path/command/content，对这两类调用全部取到 None，
+    // is_mutating() 因此返回 false，ContractGate / ImpactEvidenceGate 静默放行——
+    // 这正好击穿了“未知写工具 fail-closed”的承诺。这里先解包一层，再用
+    // 内层工具名补充 kind 提示；同时把这类外部调用标记为 assume_mutating，
+    // 即使内层参数键不认识也不会被当成只读。
+    let mut effective_name = tool_name.to_string();
+    let mut effective_args = args;
+    let mut external_invocation = false;
+    for wrapper_key in ["arguments", "input"] {
+        if let Some(inner) = args.get(wrapper_key).filter(|v| v.is_object()) {
+            effective_args = inner;
+            external_invocation = true;
+            let inner_name = args
+                .get("toolName")
+                .or_else(|| args.get("tool_name"))
+                .or_else(|| args.get("capabilityId"))
+                .or_else(|| args.get("capability_id"))
+                .and_then(|v| v.as_str());
+            if let Some(inner_name) = inner_name {
+                effective_name = format!("{tool_name}::{inner_name}");
+            }
+            break;
+        }
+    }
     let pick = |keys: &[&str]| -> Option<String> {
         for k in keys {
-            if let Some(v) = args.get(*k).and_then(|v| v.as_str()) {
-                if !v.is_empty() {
-                    return Some(v.to_string());
+            // 先看解包后的内层参数，再兜底看顶层（两者相同时只查一次）。
+            for source in [effective_args, args] {
+                if let Some(v) = source.get(*k).and_then(|v| v.as_str()) {
+                    if !v.is_empty() {
+                        return Some(v.to_string());
+                    }
+                }
+                if std::ptr::eq(effective_args, args) {
+                    break;
                 }
             }
         }
         None
     };
     ProposedAction {
-        kind_raw: tool_name.to_string(),
+        kind_raw: effective_name,
+        assume_mutating: external_invocation,
         target_path: pick(&[
             "path",
             "file_path",
@@ -122,16 +162,63 @@ mod tests {
     }
 
     #[test]
+    fn mcp_invocation_unwraps_nested_arguments_and_is_gated() {
+        // invoke_mcp_tool 的真实参数在 `arguments` 里；旧实现取不到 path/content，
+        // 会被当成只读放行。
+        let a = proposed_action_from_tool_call(
+            "invoke_mcp_tool",
+            &json!({
+                "serverId": "fs",
+                "toolName": "apply_edit",
+                "arguments": { "path": "src/ui/App.tsx", "content": "x" }
+            }),
+        );
+        assert_eq!(a.target_path.as_deref(), Some("src/ui/App.tsx"));
+        assert_eq!(a.kind_raw, "invoke_mcp_tool::apply_edit");
+        assert!(a.is_mutating());
+    }
+
+    #[test]
+    fn mcp_invocation_with_unknown_arg_keys_is_still_mutating() {
+        // 即使内层参数键完全不认识，外部调用也不能被当成只读（fail-closed）。
+        let a = proposed_action_from_tool_call(
+            "invoke_mcp_tool",
+            &json!({
+                "serverId": "db",
+                "toolName": "execute_sql",
+                "arguments": { "statement": "DROP TABLE users" }
+            }),
+        );
+        assert!(a.target_path.is_none());
+        assert!(a.is_mutating());
+    }
+
+    #[test]
+    fn plugin_invocation_unwraps_input() {
+        let a = proposed_action_from_tool_call(
+            "invoke_plugin_capability",
+            &json!({
+                "pluginId": "p1",
+                "capabilityId": "writer",
+                "input": { "path": "src/x.ts", "content": "y" }
+            }),
+        );
+        assert_eq!(a.target_path.as_deref(), Some("src/x.ts"));
+        assert_eq!(a.kind_raw, "invoke_plugin_capability::writer");
+        assert!(a.is_mutating());
+    }
+
+    #[test]
+    fn no_contract_returns_none() {
+        assert!(extract_contract_block("just a normal reply").is_none());
+    }
+
+    #[test]
     fn extracts_contract_block_zh() {
         let text = "好的，下面是契约：\n\nAtlas 目标合同\n目标：\n- 实现 X\n\nATLAS_STOP: 等待确认。\n之后的闲聊";
         let block = extract_contract_block(text).unwrap();
         assert!(block.contains("Atlas 目标合同"));
         assert!(block.contains("实现 X"));
         assert!(!block.contains("闲聊"));
-    }
-
-    #[test]
-    fn no_contract_returns_none() {
-        assert!(extract_contract_block("just a normal reply").is_none());
     }
 }
